@@ -349,7 +349,7 @@ function renderPreview() {
   // 绘制色块
   for (let by = 0; by < BLOCK_SIZE; by++) {
     for (let bx = 0; bx < BLOCK_SIZE; bx++) {
-      const idx = indices[by * BLOCK_SIZE + bx]
+      const idx = reduced[by * BLOCK_SIZE + bx]
       ctx.fillStyle = PALETTE_HEX[idx]
       const x = Math.floor(px + bx * cell)
       const y = Math.floor(py + by * cell)
