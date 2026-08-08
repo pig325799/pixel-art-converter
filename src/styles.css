@@ -12,9 +12,26 @@ html, body, #app {
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Microsoft YaHei', sans-serif;
-  background: #1a1d24;
   color: #e6e6e6;
   overflow: hidden;
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(110, 89, 255, 0.22), transparent 60%),
+    radial-gradient(900px 500px at 110% 10%, rgba(255, 120, 200, 0.15), transparent 60%),
+    radial-gradient(800px 700px at 50% 120%, rgba(0, 220, 200, 0.12), transparent 60%),
+    linear-gradient(180deg, #0f1218 0%, #141822 100%);
+  background-attachment: fixed;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+  background-size: 28px 28px;
+  pointer-events: none;
+  z-index: 0;
 }
 
 button {
@@ -24,4 +41,20 @@ button {
 
 input[type='range'] {
   vertical-align: middle;
+}
+
+/* 自定义滚动条（若有溢出） */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #3a4050;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4a5366;
 }

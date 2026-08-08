@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { PALETTE, PALETTE_HEX, sampleToBlockIndices } from '../utils/palette.js'
 
 const BLOCK_SIZE = 24
@@ -13,13 +13,48 @@ const previewWrapRef = ref(null)
 
 /* ---------------- 响应式状态 ---------------- */
 const hasImage = ref(false)
-const zoomPercent = ref(100) // 显示用
-const blockIndices = ref([]) // 预览色块索引
+const zoomPercent = ref(100)
+const blockIndices = ref([])
 const previewReady = ref(false)
+const sourceInfo = ref({ w: 0, h: 0 })
 
-/* ---------------- 内部变量（非响应式） ---------------- */
+/* ---------------- 调色板分组展示 ---------------- */
+const paletteGroups = computed(() => [
+  { name: '灰阶', start: 0, end: 4, hue: 'mono' },
+  { name: '红', start: 4, end: 12, hue: 'red' },
+  { name: '橙', start: 12, end: 20, hue: 'orange' },
+  { name: '绿', start: 20, end: 24, hue: 'green' },
+  { name: '棕', start: 24, end: 28, hue: 'brown' },
+  { name: '蓝', start: 28, end: 32, hue: 'blue' },
+  { name: '紫', start: 32, end: 36, hue: 'purple' },
+  { name: '青', start: 36, end: 40, hue: 'cyan' }
+])
+
+/* ---------------- 预览统计 ---------------- */
+const previewStats = computed(() => {
+  const arr = blockIndices.value
+  if (!arr.length) return { unique: 0, topColor: -1 }
+  const counts = new Map()
+  let top = -1
+  let topN = 0
+  for (const c of arr) {
+    const n = (counts.get(c) || 0) + 1
+    counts.set(c, n)
+    if (n > topN) {
+      topN = n
+      top = c
+    }
+  }
+  return {
+    unique: counts.size,
+    topColor: top,
+    topPercent: Math.round((topN / arr.length) * 100)
+  }
+})
+
+/* ---------------- 内部变量 ---------------- */
 let imgEl = null
-let sourceCanvas = null // 离屏 canvas，缓存源图像像素
+let sourceCanvas = null
 let sourceCtx = null
 let sourceImageData = null
 
@@ -29,19 +64,16 @@ let leftH = 0
 let previewW = 0
 let previewH = 0
 
-// 图像变换：图像左上角在画布坐标系中的位置 + 缩放
 let offsetX = 0
 let offsetY = 0
 let scale = 1
 const MIN_SCALE = 0.05
 const MAX_SCALE = 30
 
-// 选区框（画布坐标）
 let frameSize = 0
 let frameX = 0
 let frameY = 0
 
-// 拖拽状态
 let dragging = false
 let dragStartX = 0
 let dragStartY = 0
@@ -57,8 +89,7 @@ function triggerUpload() {
   fileInputRef.value?.click()
 }
 
-function onFileChange(e) {
-  const file = e.target.files?.[0]
+function loadFile(file) {
   if (!file) return
   if (!file.type.startsWith('image/')) {
     alert('请上传图片文件')
@@ -69,6 +100,10 @@ function onFileChange(e) {
     const img = new Image()
     img.onload = () => {
       imgEl = img
+      sourceInfo.value = {
+        w: img.naturalWidth,
+        h: img.naturalHeight
+      }
       prepareSource()
       hasImage.value = true
       nextTick(() => {
@@ -80,8 +115,17 @@ function onFileChange(e) {
     img.src = reader.result
   }
   reader.readAsDataURL(file)
-  // 允许重复上传同一文件
+}
+
+function onFileChange(e) {
+  const file = e.target.files?.[0]
+  loadFile(file)
   e.target.value = ''
+}
+
+function onDropFile(e) {
+  const file = e.dataTransfer?.files?.[0]
+  loadFile(file)
 }
 
 function prepareSource() {
@@ -112,7 +156,6 @@ function resizeLeftCanvas() {
   canvas.height = Math.round(leftH * dpr)
   canvas.style.width = leftW + 'px'
   canvas.style.height = leftH + 'px'
-  // 选区框：画布短边的 70%，且为正方形
   frameSize = Math.floor(Math.min(leftW, leftH) * 0.72)
   frameX = Math.round((leftW - frameSize) / 2)
   frameY = Math.round((leftH - frameSize) / 2)
@@ -146,7 +189,6 @@ function fitImage() {
   if (!imgEl || leftW === 0) return
   const iw = imgEl.naturalWidth
   const ih = imgEl.naturalHeight
-  // 让图像刚好放进画布（留点边距），并居中
   const fit = Math.min(leftW / iw, leftH / ih) * 0.9
   scale = clamp(fit, MIN_SCALE, MAX_SCALE)
   offsetX = (leftW - iw * scale) / 2
@@ -167,10 +209,8 @@ function doRender() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, leftW, leftH)
 
-  // 画布背景（棋盘格表示透明）
   drawCheckerboard(ctx, leftW, leftH)
 
-  // 绘制图像
   ctx.save()
   ctx.translate(offsetX, offsetY)
   ctx.scale(scale, scale)
@@ -179,31 +219,61 @@ function doRender() {
   ctx.drawImage(imgEl, 0, 0)
   ctx.restore()
 
-  // 暗化选区外区域（选区内保持原亮度）
+  // 选区外暗化（半透明渐变遮罩让边缘更柔和）
   ctx.save()
-  ctx.fillStyle = 'rgba(10, 12, 18, 0.62)'
+  const g = ctx.createLinearGradient(0, 0, 0, 1)
+  g.addColorStop(0, 'rgba(10, 12, 18, 0.7)')
+  g.addColorStop(1, 'rgba(10, 12, 18, 0.58)')
+  ctx.fillStyle = g
   ctx.beginPath()
   ctx.rect(0, 0, leftW, leftH)
   ctx.rect(frameX, frameY, frameSize, frameSize)
   ctx.fill('evenodd')
   ctx.restore()
 
-  // 选区框边框
+  // 选区框：金色外边框 + 内阴影
   ctx.save()
-  ctx.strokeStyle = '#ffd54a'
+  ctx.shadowColor = 'rgba(255, 200, 80, 0.35)'
+  ctx.shadowBlur = 12
+  ctx.strokeStyle = '#ffd45c'
   ctx.lineWidth = 2
-  ctx.strokeRect(frameX, frameY, frameSize, frameSize)
-  // 四角小标记
-  const c = 10
+  ctx.strokeRect(frameX + 0.5, frameY + 0.5, frameSize - 1, frameSize - 1)
+  ctx.restore()
+
+  // 内描边（暗色对比，让框更清晰）
+  ctx.save()
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)'
+  ctx.lineWidth = 1
+  ctx.strokeRect(frameX + 2.5, frameY + 2.5, frameSize - 5, frameSize - 5)
+  ctx.restore()
+
+  // 四角标记
+  const c = 12
+  ctx.save()
   ctx.lineWidth = 3
-  ctx.strokeStyle = '#ffd54a'
+  ctx.strokeStyle = '#ffe083'
+  ctx.lineCap = 'square'
   drawCorner(ctx, frameX, frameY, c)
   drawCorner(ctx, frameX + frameSize, frameY, c, 1, 0)
   drawCorner(ctx, frameX, frameY + frameSize, c, 0, 1)
   drawCorner(ctx, frameX + frameSize, frameY + frameSize, c, 1, 1)
   ctx.restore()
 
-  // 更新预览
+  // 中心点
+  ctx.save()
+  const cx = frameX + frameSize / 2
+  const cy = frameY + frameSize / 2
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)'
+  ctx.lineWidth = 1
+  ctx.setLineDash([4, 4])
+  ctx.beginPath()
+  ctx.moveTo(cx, frameY)
+  ctx.lineTo(cx, frameY + frameSize)
+  ctx.moveTo(frameX, cy)
+  ctx.lineTo(frameX + frameSize, cy)
+  ctx.stroke()
+  ctx.restore()
+
   renderPreview()
 }
 
@@ -216,10 +286,10 @@ function drawCorner(ctx, x, y, len, fx = 0, fy = 0) {
 }
 
 function drawCheckerboard(ctx, w, h) {
-  const s = 12
-  ctx.fillStyle = '#2a2e36'
+  const s = 14
+  ctx.fillStyle = '#1e2230'
   ctx.fillRect(0, 0, w, h)
-  ctx.fillStyle = '#262932'
+  ctx.fillStyle = '#181b26'
   for (let y = 0; y < h; y += s) {
     for (let x = 0; x < w; x += s) {
       if (((x / s) | 0) % 2 === ((y / s) | 0) % 2) {
@@ -237,7 +307,6 @@ function renderPreview() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, previewW, previewH)
 
-  // 选区框在画布坐标 → 源图像坐标
   const sx = (frameX - offsetX) / scale
   const sy = (frameY - offsetY) / scale
   const sw = frameSize / scale
@@ -254,42 +323,54 @@ function renderPreview() {
   blockIndices.value = indices
   previewReady.value = true
 
-  // 计算预览绘制区域：正方形，居中
-  const size = Math.min(previewW, previewH) * 0.9
+  const size = Math.min(previewW, previewH) * 0.86
   const px = (previewW - size) / 2
   const py = (previewH - size) / 2
   const cell = size / BLOCK_SIZE
 
-  // 背景
-  ctx.fillStyle = '#1a1d24'
-  ctx.fillRect(px - 2, py - 2, size + 4, size + 4)
+  // 预览底板：内阴影 + 细边
+  const pad = 10
+  ctx.save()
+  ctx.fillStyle = '#0e1016'
+  roundRect(ctx, px - pad, py - pad, size + pad * 2, size + pad * 2, 12)
+  ctx.fill()
+  ctx.restore()
 
+  // 绘制色块
   for (let by = 0; by < BLOCK_SIZE; by++) {
     for (let bx = 0; bx < BLOCK_SIZE; bx++) {
       const idx = indices[by * BLOCK_SIZE + bx]
       ctx.fillStyle = PALETTE_HEX[idx]
-      ctx.fillRect(
-        Math.floor(px + bx * cell),
-        Math.floor(py + by * cell),
-        Math.ceil(cell),
-        Math.ceil(cell)
-      )
+      const x = Math.floor(px + bx * cell)
+      const y = Math.floor(py + by * cell)
+      const w = Math.ceil(cell)
+      const h = Math.ceil(cell)
+      ctx.fillRect(x, y, w, h)
+      // 每格 1px 深色描边，让色块感更清晰（仅当 cell >= 3 时）
+      if (cell >= 3) {
+        ctx.fillStyle = 'rgba(0,0,0,0.10)'
+        ctx.fillRect(x, y + h - 1, w, 1)
+        ctx.fillRect(x + w - 1, y, 1, h)
+      }
     }
   }
 
-  // 网格线（淡）
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)'
+  // 外层亮边
+  ctx.save()
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'
   ctx.lineWidth = 1
+  ctx.strokeRect(px + 0.5, py + 0.5, size - 1, size - 1)
+  ctx.restore()
+}
+
+function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath()
-  for (let i = 0; i <= BLOCK_SIZE; i++) {
-    const p = Math.floor(px + i * cell) + 0.5
-    ctx.moveTo(p, py)
-    ctx.lineTo(p, py + size)
-    const q = Math.floor(py + i * cell) + 0.5
-    ctx.moveTo(px, q)
-    ctx.lineTo(px + size, q)
-  }
-  ctx.stroke()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + w, y, x + w, y + h, r)
+  ctx.arcTo(x + w, y + h, x, y + h, r)
+  ctx.arcTo(x, y + h, x, y, r)
+  ctx.arcTo(x, y, x + w, y, r)
+  ctx.closePath()
 }
 
 /* ---------------- 拖拽 ---------------- */
@@ -322,7 +403,6 @@ function onWheel(e) {
   const rect = leftCanvasRef.value.getBoundingClientRect()
   const cx = e.clientX - rect.left
   const cy = e.clientY - rect.top
-  // 以鼠标为中心缩放
   const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12
   const newScale = clamp(scale * factor, MIN_SCALE, MAX_SCALE)
   const real = newScale / scale
@@ -338,7 +418,6 @@ function setZoomFromSlider() {
   if (!hasImage.value) return
   const target = zoomPercent.value / 100
   const newScale = clamp(target, MIN_SCALE, MAX_SCALE)
-  // 以选区框中心为锚点缩放
   const cx = frameX + frameSize / 2
   const cy = frameY + frameSize / 2
   const real = newScale / scale
@@ -365,7 +444,6 @@ function resetView() {
 /* ---------------- 下载 ---------------- */
 function downloadPng() {
   if (!previewReady.value) return
-  // 输出原始 24x24 像素 + 放大版
   const out = document.createElement('canvas')
   const upscale = 32
   out.width = BLOCK_SIZE * upscale
@@ -385,7 +463,6 @@ function downloadPng() {
   a.click()
 }
 
-/* ---------------- 工具 ---------------- */
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v))
 }
@@ -413,42 +490,88 @@ const colorCount = PALETTE.length
 
 <template>
   <div class="converter">
-    <!-- 顶部工具栏 -->
-    <div class="toolbar">
-      <button class="btn primary" @click="triggerUpload">上传图片</button>
-      <input
-        ref="fileInputRef"
-        type="file"
-        accept="image/*"
-        class="hidden-file"
-        @change="onFileChange"
-      />
+    <!-- 工具栏 -->
+    <div class="toolbar card">
+      <div class="tool-group">
+        <button class="btn primary" @click="triggerUpload">
+          <span class="btn-icon">↑</span>
+          <span>上传图片</span>
+        </button>
+        <input
+          ref="fileInputRef"
+          type="file"
+          accept="image/*"
+          class="hidden-file"
+          @change="onFileChange"
+        />
+      </div>
+
       <template v-if="hasImage">
-        <div class="zoom-controls">
+        <div class="divider"></div>
+        <div class="zoom-controls tool-group">
           <button class="btn icon" @click="zoomOut" title="缩小">−</button>
-          <input
-            type="range"
-            min="1"
-            max="3000"
-            v-model.number="zoomPercent"
-            @input="setZoomFromSlider"
-            class="zoom-slider"
-          />
+          <div class="slider-wrap">
+            <input
+              type="range"
+              min="1"
+              max="3000"
+              v-model.number="zoomPercent"
+              @input="setZoomFromSlider"
+              class="zoom-slider"
+              :style="{
+                '--fill': Math.min(100, Math.max(0, (zoomPercent - 1) / 29.99)) + '%'
+              }"
+            />
+          </div>
           <button class="btn icon" @click="zoomIn" title="放大">+</button>
           <span class="zoom-value">{{ zoomPercent }}%</span>
         </div>
-        <button class="btn" @click="resetView">重置视图</button>
-        <button class="btn accent" @click="downloadPng">下载像素画</button>
+
+        <div class="divider"></div>
+
+        <div class="tool-group">
+          <button class="btn soft" @click="resetView">
+            <span class="btn-icon">⟲</span>
+            <span>重置</span>
+          </button>
+          <button class="btn accent" @click="downloadPng">
+            <span class="btn-icon">↓</span>
+            <span>下载像素画</span>
+          </button>
+        </div>
       </template>
+
       <span class="spacer"></span>
-      <span class="palette-count">调色板：{{ colorCount }} 色</span>
+
+      <div class="tool-group info-group">
+        <div class="info-chip" v-if="hasImage">
+          <span class="dot dot-img"></span>
+          <span>原图 {{ sourceInfo.w }} × {{ sourceInfo.h }}</span>
+        </div>
+        <div class="info-chip">
+          <span class="dot dot-palette"></span>
+          <span>调色板 {{ colorCount }} 色</span>
+        </div>
+      </div>
     </div>
 
-    <!-- 主体：左右两栏 -->
+    <!-- 主体：左右两张卡片 -->
     <div class="panels">
-      <!-- 左侧：上传 + 选区 -->
-      <section class="panel left-panel">
-        <div class="panel-label">原图（拖拽移动 · 滚轮缩放）</div>
+      <!-- 左侧 -->
+      <section class="panel card left-panel">
+        <header class="panel-head">
+          <div class="panel-title">
+            <span class="title-dot title-dot-blue"></span>
+            原图编辑
+          </div>
+          <div class="panel-tips" v-if="hasImage">
+            <span class="tip">🖱 拖拽</span>
+            <span class="tip">🔍 滚轮缩放</span>
+          </div>
+          <div class="panel-tips" v-else>
+            <span class="tip">点击下方卡片上传</span>
+          </div>
+        </header>
         <div class="canvas-wrap" ref="leftWrapRef">
           <canvas
             v-show="hasImage"
@@ -460,33 +583,88 @@ const colorCount = PALETTE.length
             @pointercancel="onPointerUp"
             @wheel="onWheel"
           ></canvas>
-          <div v-if="!hasImage" class="empty-state" @click="triggerUpload">
-            <div class="empty-icon">＋</div>
-            <div class="empty-text">点击上传图片</div>
-            <div class="empty-hint">支持拖拽与滚轮缩放调整选区</div>
+          <div
+            v-if="!hasImage"
+            class="empty-state"
+            @click="triggerUpload"
+            @dragover.prevent
+            @dragenter.prevent
+            @drop.prevent="onDropFile"
+          >
+            <div class="empty-frame">
+              <div class="empty-pix-grid" aria-hidden="true">
+                <span v-for="n in 16" :key="n" class="empty-pix" :class="'p' + n"></span>
+              </div>
+              <div class="empty-plus">＋</div>
+            </div>
+            <div class="empty-text">点击这里上传图片</div>
+            <div class="empty-hint">支持 JPG / PNG / WebP 等常见格式</div>
           </div>
         </div>
       </section>
 
-      <!-- 右侧：预览 -->
-      <section class="panel right-panel">
-        <div class="panel-label">像素画预览（{{ BLOCK_SIZE }}×{{ BLOCK_SIZE }} 色块）</div>
+      <!-- 中间分隔条 -->
+      <div class="vs-sep" aria-hidden="true">
+        <div class="sep-glow"></div>
+      </div>
+
+      <!-- 右侧 -->
+      <section class="panel card right-panel">
+        <header class="panel-head">
+          <div class="panel-title">
+            <span class="title-dot title-dot-warm"></span>
+            像素画预览
+            <span class="badge-24">{{ BLOCK_SIZE }}×{{ BLOCK_SIZE }}</span>
+          </div>
+          <div class="panel-tips" v-if="previewReady">
+            <span class="tip tip-good">
+              使用 {{ previewStats.unique }} / {{ colorCount }} 色
+            </span>
+            <span
+              class="tip"
+              v-if="previewStats.topColor >= 0"
+              :style="{ color: PALETTE_HEX[previewStats.topColor] }"
+            >
+              <span class="swatch-dot" :style="{ background: PALETTE_HEX[previewStats.topColor] }"></span>
+              主色 {{ previewStats.topPercent }}%
+            </span>
+          </div>
+        </header>
+
         <div class="canvas-wrap preview-wrap" ref="previewWrapRef">
           <canvas ref="previewCanvasRef" class="stage"></canvas>
           <div v-if="!hasImage" class="empty-state muted">
-            <div class="empty-text">上传图片后显示预览</div>
+            <div class="empty-frame empty-frame-muted">
+              <div class="empty-pix-grid mono" aria-hidden="true">
+                <span v-for="n in 16" :key="n" class="empty-pix mono"></span>
+              </div>
+            </div>
+            <div class="empty-text">上传图片后显示像素画预览</div>
+            <div class="empty-hint">实时量化为 40 色调色板</div>
           </div>
         </div>
 
-        <!-- 调色板展示 -->
-        <div class="palette-bar">
-          <div
-            v-for="(hex, i) in PALETTE_HEX"
-            :key="i"
-            class="swatch"
-            :style="{ background: hex }"
-            :title="`#${i + 1}`"
-          ></div>
+        <!-- 调色板分组 -->
+        <div class="palette-panel">
+          <div class="palette-title">40 色调色板</div>
+          <div class="palette-groups">
+            <div
+              v-for="(g, gi) in paletteGroups"
+              :key="gi"
+              class="palette-group"
+            >
+              <div class="group-label" :data-hue="g.hue">{{ g.name }}</div>
+              <div class="group-swatches">
+                <div
+                  v-for="i in g.end - g.start"
+                  :key="i"
+                  class="swatch"
+                  :style="{ background: PALETTE_HEX[g.start + i - 1] }"
+                  :title="`#${g.start + i}`"
+                ></div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -497,87 +675,250 @@ const colorCount = PALETTE.length
 .converter {
   display: flex;
   flex-direction: column;
+  gap: 14px;
   height: 100%;
 }
 
+/* 卡片通用 */
+.card {
+  background: linear-gradient(
+    180deg,
+    rgba(32, 36, 50, 0.72) 0%,
+    rgba(22, 25, 36, 0.72) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  border-radius: 14px;
+}
+
+/* 工具栏 */
 .toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
-  background: #22262e;
-  border-bottom: 1px solid #333843;
+  padding: 10px 14px;
   flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.info-group {
+  gap: 6px;
+}
+
+.divider {
+  width: 1px;
+  align-self: stretch;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(255, 255, 255, 0.1) 20%,
+    rgba(255, 255, 255, 0.1) 80%,
+    transparent
+  );
+  margin: 2px 4px;
 }
 
 .btn {
-  background: #353b47;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(180deg, #3b4154 0%, #303548 100%);
   color: #e6e6e6;
-  border: 1px solid #444b58;
-  border-radius: 6px;
-  padding: 7px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 8px 14px;
   font-size: 13px;
-  transition: background 0.15s, border-color 0.15s;
+  font-weight: 500;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    filter 0.18s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
 }
 .btn:hover {
-  background: #3f4654;
+  filter: brightness(1.1);
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
 }
+.btn:active {
+  transform: translateY(0);
+}
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.9;
+}
+
 .btn.primary {
-  background: #4a7cff;
-  border-color: #4a7cff;
-  color: #fff;
+  background: linear-gradient(180deg, #6b8cff 0%, #4a6dff 100%);
+  border-color: rgba(150, 175, 255, 0.45);
+  box-shadow:
+    0 4px 14px rgba(90, 120, 255, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 .btn.primary:hover {
-  background: #5d8bff;
+  box-shadow:
+    0 6px 18px rgba(90, 120, 255, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
+
 .btn.accent {
-  background: #2faa6a;
-  border-color: #2faa6a;
-  color: #fff;
+  background: linear-gradient(180deg, #42cf88 0%, #28a868 100%);
+  border-color: rgba(130, 230, 180, 0.4);
+  color: #0b2916;
+  box-shadow:
+    0 4px 14px rgba(50, 180, 110, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 .btn.accent:hover {
-  background: #36c178;
+  box-shadow:
+    0 6px 18px rgba(50, 180, 110, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
+
+.btn.soft {
+  background: linear-gradient(180deg, #3a3f52 0%, #313647 100%);
+}
+
 .btn.icon {
-  width: 30px;
-  padding: 7px 0;
-  text-align: center;
-  font-size: 16px;
-  line-height: 1;
+  width: 34px;
+  padding: 8px 0;
+  justify-content: center;
+  font-size: 17px;
+  font-weight: 700;
 }
 
 .hidden-file {
   display: none;
 }
 
+/* 缩放滑块 */
 .zoom-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 5px 10px 5px 5px;
+  border-radius: 12px;
 }
+
+.slider-wrap {
+  position: relative;
+  padding: 2px 0;
+}
+
 .zoom-slider {
-  width: 150px;
-  accent-color: #4a7cff;
+  width: 160px;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  background: linear-gradient(
+    90deg,
+    #4a6dff 0%,
+    #4a6dff var(--fill, 30%),
+    #2a2f3f var(--fill, 30%),
+    #2a2f3f 100%
+  );
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
 }
+.zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 3px rgba(90, 120, 255, 0.35),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: transform 0.12s;
+}
+.zoom-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.zoom-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  border: none;
+  box-shadow:
+    0 0 0 3px rgba(90, 120, 255, 0.35),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+
 .zoom-value {
   font-size: 12px;
-  color: #9aa3b2;
-  width: 48px;
+  font-variant-numeric: tabular-nums;
+  color: #b3bcd1;
+  width: 54px;
   text-align: right;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .spacer {
   flex: 1;
 }
 
-.palette-count {
+/* 信息 chip */
+.info-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   font-size: 12px;
-  color: #8b93a3;
+  color: #b3bcd1;
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot-img {
+  background: #6b8cff;
+  box-shadow: 0 0 6px rgba(107, 140, 255, 0.7);
+}
+.dot-palette {
+  background: conic-gradient(
+    from 0deg,
+    #ff5c8a,
+    #ffcf5c,
+    #6bff9e,
+    #5cc8ff,
+    #b084ff,
+    #ff5c8a
+  );
 }
 
+/* 主体两栏 */
 .panels {
   flex: 1;
   display: flex;
+  gap: 14px;
   min-height: 0;
 }
 
@@ -587,33 +928,145 @@ const colorCount = PALETTE.length
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+  padding: 0;
 }
 
-.left-panel {
-  border-right: 1px solid #333843;
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.panel-label {
-  padding: 8px 14px;
-  font-size: 12px;
-  color: #8b93a3;
-  background: #1e2128;
-  border-bottom: 1px solid #2a2e36;
+.panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #e5e9f2;
 }
 
+.title-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  box-shadow: 0 0 8px currentColor;
+}
+.title-dot-blue {
+  background: #6b8cff;
+  color: rgba(107, 140, 255, 0.7);
+}
+.title-dot-warm {
+  background: linear-gradient(135deg, #ffb36a 0%, #ff6b8a 100%);
+  color: rgba(255, 150, 120, 0.7);
+}
+
+.badge-24 {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(255,179,106,0.15), rgba(255,107,138,0.15));
+  border: 1px solid rgba(255, 150, 150, 0.25);
+  color: #ffc6a5;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  margin-left: 2px;
+}
+
+.panel-tips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tip {
+  font-size: 11.5px;
+  color: #9aa3b8;
+  padding: 3px 9px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tip-good {
+  background: rgba(80, 200, 140, 0.1);
+  border-color: rgba(80, 200, 140, 0.22);
+  color: #88d6ad;
+}
+
+.swatch-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  display: inline-block;
+}
+
+/* 画布容器 */
 .canvas-wrap {
   flex: 1;
   position: relative;
   overflow: hidden;
-  background: #15171c;
   min-height: 0;
+  margin: 14px;
+  margin-bottom: 14px;
+  border-radius: 10px;
+  background: #0e1016;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.preview-wrap {
+  margin-bottom: 10px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(120, 175, 255, 0.08), transparent 60%),
+    #0e1016;
 }
 
 .stage {
   display: block;
+  width: 100%;
+  height: 100%;
   touch-action: none;
 }
 
+/* 中间 vs 分隔 */
+.vs-sep {
+  align-self: stretch;
+  width: 2px;
+  position: relative;
+  border-radius: 2px;
+  background: linear-gradient(
+    180deg,
+    transparent 5%,
+    rgba(255, 255, 255, 0.06) 20%,
+    rgba(255, 255, 255, 0.1) 50%,
+    rgba(255, 255, 255, 0.06) 80%,
+    transparent 95%
+  );
+  flex-shrink: 0;
+  margin: 30px 0;
+}
+.sep-glow {
+  position: absolute;
+  inset: 40% -3px 40% -3px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(120, 175, 255, 0.6) 50%,
+    transparent
+  );
+  filter: blur(6px);
+  pointer-events: none;
+}
+
+/* 空状态 */
 .empty-state {
   position: absolute;
   inset: 0;
@@ -621,38 +1074,202 @@ const colorCount = PALETTE.length
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 14px;
   cursor: pointer;
-  color: #6b7382;
+  color: #8892a8;
+  transition: background 0.2s;
+}
+.empty-state:hover {
+  background: rgba(120, 175, 255, 0.04);
 }
 .empty-state.muted {
   cursor: default;
 }
-.empty-icon {
-  font-size: 48px;
-  color: #4a7cff;
-  line-height: 1;
+.empty-state.muted:hover {
+  background: transparent;
 }
+
+.empty-frame {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  border-radius: 18px;
+  background: linear-gradient(
+    145deg,
+    rgba(107, 140, 255, 0.15) 0%,
+    rgba(255, 107, 138, 0.15) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 20px 40px rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.empty-frame-muted {
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.04);
+}
+
+.empty-pix-grid {
+  position: absolute;
+  inset: 16px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(4, 1fr);
+  gap: 2px;
+  opacity: 0.7;
+}
+.empty-pix-grid.mono .empty-pix {
+  background: #2a2f3f !important;
+}
+.empty-pix {
+  border-radius: 2px;
+}
+.p1 { background: #ff5c8a; } .p2 { background: #ff9d5c; } .p3 { background: #ffcf5c; } .p4 { background: #6bff9e; }
+.p5 { background: #ff9d5c; } .p6 { background: #ffcf5c; } .p7 { background: #ffffff; } .p8 { background: #5cc8ff; }
+.p9 { background: #ffcf5c; } .p10 { background: #6bff9e; } .p11 { background: #5cc8ff; } .p12 { background: #b084ff; }
+.p13 { background: #6bff9e; } .p14 { background: #5cc8ff; } .p15 { background: #b084ff; } .p16 { background: #ff6bff; }
+
+.empty-plus {
+  position: relative;
+  z-index: 2;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: rgba(20, 24, 34, 0.85);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  font-weight: 300;
+  backdrop-filter: blur(4px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
 .empty-text {
   font-size: 15px;
+  color: #d7dbee;
+  font-weight: 500;
+}
+.empty-state.muted .empty-text {
+  color: #8690a6;
+  font-weight: 400;
 }
 .empty-hint {
   font-size: 12px;
-  color: #555c6a;
+  color: #616a80;
 }
 
-.palette-bar {
+/* 调色板面板 */
+.palette-panel {
+  padding: 12px 16px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0) 0%,
+    rgba(0, 0, 0, 0.2) 100%
+  );
+}
+
+.palette-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #b3bcd1;
+  margin-bottom: 10px;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.palette-title::before {
+  content: '';
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #6b8cff, #ff6b8a);
+}
+
+.palette-groups {
   display: flex;
   flex-wrap: wrap;
-  gap: 3px;
-  padding: 10px 14px;
-  background: #1e2128;
-  border-top: 1px solid #2a2e36;
+  gap: 10px 14px;
 }
+
+.palette-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.group-label {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #8690a6;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  align-self: flex-start;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.group-label[data-hue='mono'] { color: #bdc3d1; border-color: rgba(255,255,255,0.1); }
+.group-label[data-hue='red'] { color: #ff9fae; border-color: rgba(255,100,120,0.25); background: rgba(255,100,120,0.08); }
+.group-label[data-hue='orange'] { color: #ffc18a; border-color: rgba(255,170,100,0.25); background: rgba(255,170,100,0.08); }
+.group-label[data-hue='yellow'] { color: #fff3a8; border-color: rgba(255,230,120,0.25); background: rgba(255,230,120,0.08); }
+.group-label[data-hue='green'] { color: #9bf0b8; border-color: rgba(100,220,140,0.25); background: rgba(100,220,140,0.08); }
+.group-label[data-hue='cyan'] { color: #9be8ef; border-color: rgba(100,210,220,0.25); background: rgba(100,210,220,0.08); }
+.group-label[data-hue='blue'] { color: #a7c3ff; border-color: rgba(120,160,255,0.25); background: rgba(120,160,255,0.08); }
+.group-label[data-hue='purple'] { color: #d9b6ff; border-color: rgba(180,120,230,0.25); background: rgba(180,120,230,0.08); }
+.group-label[data-hue='brown'] { color: #d5a377; border-color: rgba(180,130,80,0.25); background: rgba(180,130,80,0.08); }
+
+.group-swatches {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
 .swatch {
-  width: 18px;
-  height: 18px;
-  border-radius: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.swatch:hover {
+  transform: scale(1.15) translateY(-1px);
+  z-index: 2;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+    0 3px 8px rgba(0, 0, 0, 0.45);
+}
+
+/* 小屏自适应 */
+@media (max-width: 900px) {
+  .panels {
+    flex-direction: column;
+  }
+  .vs-sep {
+    width: auto;
+    height: 2px;
+    margin: 0 40px;
+  }
+  .sep-glow {
+    inset: -3px 40% -3px 40%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(120, 175, 255, 0.6) 50%,
+      transparent
+    );
+  }
 }
 </style>
