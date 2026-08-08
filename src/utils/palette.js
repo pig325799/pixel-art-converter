@@ -136,3 +136,42 @@ export function sampleToBlockIndices(
   }
   return result
 }
+
+export function reduceColors(indices, maxColors) {
+  if (indices.length <= maxColors) return indices
+
+  const counts = new Map()
+  for (const idx of indices) {
+    counts.set(idx, (counts.get(idx) || 0) + 1)
+  }
+
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1])
+  const kept = new Set(sorted.slice(0, maxColors).map(([idx]) => idx))
+
+  if (kept.size === 0) return indices
+
+  const mapping = new Map()
+  for (const idx of counts.keys()) {
+    if (kept.has(idx)) {
+      mapping.set(idx, idx)
+    } else {
+      const [r, g, b] = PALETTE[idx]
+      let bestIdx = -1
+      let bestDist = Infinity
+      for (const keptIdx of kept) {
+        const [pr, pg, pb] = PALETTE[keptIdx]
+        const dr = r - pr
+        const dg = g - pg
+        const db = b - pb
+        const dist = 0.3 * dr * dr + 0.59 * dg * dg + 0.11 * db * db
+        if (dist < bestDist) {
+          bestDist = dist
+          bestIdx = keptIdx
+        }
+      }
+      mapping.set(idx, bestIdx)
+    }
+  }
+
+  return indices.map(idx => mapping.get(idx) ?? idx)
+}

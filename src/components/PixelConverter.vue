@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { PALETTE, PALETTE_HEX, sampleToBlockIndices } from '../utils/palette.js'
+import { PALETTE, PALETTE_HEX, sampleToBlockIndices, reduceColors } from '../utils/palette.js'
 
 const BLOCK_SIZE = 24
 
@@ -14,6 +14,7 @@ const previewWrapRef = ref(null)
 /* ---------------- 响应式状态 ---------------- */
 const hasImage = ref(false)
 const zoomPercent = ref(100)
+const maxColors = ref(16)
 const blockIndices = ref([])
 const previewReady = ref(false)
 const sourceInfo = ref({ w: 0, h: 0 })
@@ -320,7 +321,8 @@ function renderPreview() {
     sh,
     BLOCK_SIZE
   )
-  blockIndices.value = indices
+  const reduced = reduceColors(indices, maxColors.value)
+  blockIndices.value = reduced
   previewReady.value = true
 
   const size = Math.min(previewW, previewH) * 0.86
@@ -441,6 +443,11 @@ function resetView() {
   render()
 }
 
+function setColorCount(n) {
+  maxColors.value = n
+  if (hasImage.value) render()
+}
+
 /* ---------------- 下载 ---------------- */
 function downloadPng() {
   if (!previewReady.value) return
@@ -525,6 +532,19 @@ const colorCount = PALETTE.length
           </div>
           <button class="btn icon" @click="zoomIn" title="放大">+</button>
           <span class="zoom-value">{{ zoomPercent }}%</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="tool-group color-controls">
+          <span class="color-label">颜色数</span>
+          <button
+            v-for="n in [8, 16, 24, 40]"
+            :key="n"
+            class="btn chip"
+            :class="{ active: maxColors === n }"
+            @click="setColorCount(n)"
+          >{{ n }}</button>
         </div>
 
         <div class="divider"></div>
@@ -805,6 +825,42 @@ const colorCount = PALETTE.length
 
 .hidden-file {
   display: none;
+}
+
+/* 颜色数控制 */
+.color-controls {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 5px 10px;
+  border-radius: 12px;
+}
+.color-label {
+  font-size: 12px;
+  color: #9aa3b8;
+  margin-right: 4px;
+}
+.btn.chip {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #b3bcd1;
+  transition: all 0.15s ease;
+  min-width: 36px;
+}
+.btn.chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: #e5e9f2;
+  transform: none;
+}
+.btn.chip.active {
+  background: linear-gradient(180deg, #6b8cff 0%, #4a6dff 100%);
+  border-color: rgba(150, 175, 255, 0.5);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(90, 120, 255, 0.4);
 }
 
 /* 缩放滑块 */
