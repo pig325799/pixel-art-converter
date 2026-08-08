@@ -81,6 +81,14 @@ let dragStartY = 0
 let dragOffsetX = 0
 let dragOffsetY = 0
 
+let pinching = false
+let pinchStartDist = 0
+let pinchStartScale = 1
+let pinchStartOffsetX = 0
+let pinchStartOffsetY = 0
+let pinchCenterX = 0
+let pinchCenterY = 0
+
 let rafId = 0
 let roLeft = null
 let roPreview = null
@@ -415,6 +423,61 @@ function onWheel(e) {
   render()
 }
 
+function touchDist(t1, t2) {
+  const dx = t1.clientX - t2.clientX
+  const dy = t1.clientY - t2.clientY
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+function onTouchStart(e) {
+  if (!hasImage.value) return
+  if (e.touches.length === 1) {
+    dragging = true
+    dragStartX = e.touches[0].clientX
+    dragStartY = e.touches[0].clientY
+    dragOffsetX = offsetX
+    dragOffsetY = offsetY
+  } else if (e.touches.length === 2) {
+    dragging = false
+    pinching = true
+    pinchStartDist = touchDist(e.touches[0], e.touches[1])
+    pinchStartScale = scale
+    pinchStartOffsetX = offsetX
+    pinchStartOffsetY = offsetY
+    const rect = leftCanvasRef.value.getBoundingClientRect()
+    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left
+    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top
+    pinchCenterX = cx
+    pinchCenterY = cy
+  }
+  e.preventDefault()
+}
+
+function onTouchMove(e) {
+  if (!hasImage.value) return
+  if (pinching && e.touches.length === 2) {
+    const dist = touchDist(e.touches[0], e.touches[1])
+    const ratio = dist / pinchStartDist
+    const newScale = clamp(pinchStartScale * ratio, MIN_SCALE, MAX_SCALE)
+    const real = newScale / pinchStartScale
+    offsetX = pinchCenterX - (pinchCenterX - pinchStartOffsetX) * real
+    offsetY = pinchCenterY - (pinchCenterY - pinchStartOffsetY) * real
+    scale = newScale
+    zoomPercent.value = Math.round(scale * 100)
+    render()
+  } else if (dragging && e.touches.length === 1) {
+    offsetX = dragOffsetX + (e.touches[0].clientX - dragStartX)
+    offsetY = dragOffsetY + (e.touches[0].clientY - dragStartY)
+    render()
+  }
+  e.preventDefault()
+}
+
+function onTouchEnd(e) {
+  if (e.touches.length < 2) pinching = false
+  if (e.touches.length === 0) dragging = false
+}
+
 /* ---------------- 缩放控制 ---------------- */
 function setZoomFromSlider() {
   if (!hasImage.value) return
@@ -585,8 +648,10 @@ const colorCount = PALETTE.length
             原图编辑
           </div>
           <div class="panel-tips" v-if="hasImage">
-            <span class="tip">🖱 拖拽</span>
-            <span class="tip">🔍 滚轮缩放</span>
+            <span class="tip tip-desktop">🖱 拖拽</span>
+            <span class="tip tip-desktop">🔍 滚轮缩放</span>
+            <span class="tip tip-mobile">👆 拖动</span>
+            <span class="tip tip-mobile">🤏 双指缩放</span>
           </div>
           <div class="panel-tips" v-else>
             <span class="tip">点击下方卡片上传</span>
@@ -602,6 +667,10 @@ const colorCount = PALETTE.length
             @pointerup="onPointerUp"
             @pointercancel="onPointerUp"
             @wheel="onWheel"
+            @touchstart.passive="onTouchStart"
+            @touchmove.passive="onTouchMove"
+            @touchend="onTouchEnd"
+            @touchcancel="onTouchEnd"
           ></canvas>
           <div
             v-if="!hasImage"
@@ -1327,5 +1396,141 @@ const colorCount = PALETTE.length
       transparent
     );
   }
+}
+
+@media (max-width: 600px) {
+  .converter {
+    gap: 10px;
+  }
+
+  /* 工具栏：压缩间距、分组换行、按钮缩小 */
+  .toolbar {
+    padding: 8px 10px;
+    gap: 6px;
+    align-items: flex-start;
+  }
+  .toolbar .divider {
+    display: none;
+  }
+  .toolbar .tool-group {
+    width: 100%;
+    gap: 6px;
+  }
+  .toolbar .tool-group.info-group {
+    order: 99;
+    width: auto;
+    margin-top: 2px;
+  }
+  .toolbar .color-controls {
+    padding: 4px 8px;
+  }
+  .toolbar .zoom-controls {
+    padding: 4px 6px;
+  }
+  .zoom-slider {
+    width: 100px;
+  }
+  .zoom-value {
+    width: 46px;
+    font-size: 11px;
+    padding: 2px 6px;
+  }
+  .btn {
+    padding: 7px 12px;
+    font-size: 12px;
+    border-radius: 9px;
+  }
+  .btn.primary,
+  .btn.accent {
+    flex: 1;
+    justify-content: center;
+  }
+  .btn.icon {
+    width: 30px;
+    font-size: 15px;
+  }
+  .btn.chip {
+    padding: 4px 8px;
+    font-size: 11px;
+    min-width: 32px;
+  }
+  .spacer {
+    display: none;
+  }
+  .info-chip {
+    font-size: 11px;
+    padding: 4px 8px;
+  }
+  .color-label {
+    font-size: 11px;
+  }
+
+  /* 面板头部缩小 */
+  .panel-head {
+    padding: 10px 12px 8px;
+    gap: 8px;
+  }
+  .panel-title {
+    font-size: 13px;
+    gap: 6px;
+  }
+  .badge-24 {
+    font-size: 10px;
+    padding: 1px 6px;
+  }
+  .panel-tips .tip {
+    font-size: 10.5px;
+    padding: 2px 7px;
+  }
+  .tip-desktop { display: none; }
+  .tip-mobile { display: inline-flex; }
+
+  /* 画布容器给手机一个相对合适的最小高度（方形） */
+  .canvas-wrap {
+    margin: 10px;
+    min-height: 280px;
+  }
+  .preview-wrap {
+    min-height: 280px;
+  }
+
+  /* 空状态缩小 */
+  .empty-frame {
+    width: 72px;
+    height: 72px;
+    border-radius: 14px;
+  }
+  .empty-plus {
+    width: 32px;
+    height: 32px;
+    font-size: 20px;
+    border-radius: 9px;
+  }
+  .empty-text {
+    font-size: 13px;
+  }
+  .empty-hint {
+    font-size: 11px;
+  }
+
+  /* 调色板在手机端减小色块尺寸 */
+  .palette-panel {
+    padding: 10px 12px 12px;
+  }
+  .palette-groups {
+    gap: 8px 10px;
+  }
+  .swatch {
+    width: 17px;
+    height: 17px;
+    border-radius: 3px;
+  }
+  .group-label {
+    font-size: 10px;
+  }
+}
+
+@media (min-width: 601px) {
+  .tip-mobile { display: none; }
 }
 </style>

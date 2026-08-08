@@ -172,7 +172,34 @@ import PixelConverter from './components/PixelConverter.vue'
 .app-main {
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 18px 22px 22px;
+}
+
+@media (max-width: 600px) {
+  .app-header {
+    padding: 10px 14px;
+    gap: 10px;
+  }
+  .logo {
+    width: 34px;
+    height: 34px;
+    gap: 2px;
+    padding: 4px;
+    border-radius: 8px;
+  }
+  .app-header h1 {
+    font-size: 16px;
+  }
+  .subtitle-row {
+    display: none;
+  }
+  .header-deco {
+    display: none;
+  }
+  .app-main {
+    padding: 12px 12px 24px;
+  }
 }
 </style>
