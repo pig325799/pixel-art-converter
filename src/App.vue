@@ -39,7 +39,7 @@ import PixelConverter from './components/PixelConverter.vue'
 .app {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  min-height: 100vh;
   position: relative;
   z-index: 1;
 }
@@ -175,12 +175,15 @@ import PixelConverter from './components/PixelConverter.vue'
   overflow-y: auto;
   overflow-x: hidden;
   padding: 18px 22px 22px;
+  display: flex;
+  flex-direction: column;
 }
 
 @media (max-width: 600px) {
   .app-header {
     padding: 10px 14px;
     gap: 10px;
+    flex-shrink: 0;
   }
   .logo {
     width: 34px;

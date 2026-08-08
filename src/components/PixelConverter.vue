@@ -198,7 +198,7 @@ function fitImage() {
   if (!imgEl || leftW === 0) return
   const iw = imgEl.naturalWidth
   const ih = imgEl.naturalHeight
-  const fit = Math.min(leftW / iw, leftH / ih) * 0.9
+  const fit = Math.min(leftW / iw, leftH / ih) * 0.95
   scale = clamp(fit, MIN_SCALE, MAX_SCALE)
   offsetX = (leftW - iw * scale) / 2
   offsetY = (leftH - ih * scale) / 2
@@ -766,6 +766,8 @@ const colorCount = PALETTE.length
   flex-direction: column;
   gap: 14px;
   height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 /* 卡片通用 */
@@ -1485,13 +1487,19 @@ const colorCount = PALETTE.length
   .tip-desktop { display: none; }
   .tip-mobile { display: inline-flex; }
 
-  /* 画布容器给手机一个相对合适的最小高度（方形） */
+  /* 画布容器：用 flex:1 自然分配，不要 min-height 破坏布局 */
   .canvas-wrap {
     margin: 10px;
-    min-height: 280px;
   }
   .preview-wrap {
-    min-height: 280px;
+    margin-bottom: 6px;
+  }
+
+  /* 两个面板均分可用高度 */
+  .left-panel,
+  .right-panel {
+    flex: 1;
+    min-height: 320px;
   }
 
   /* 空状态缩小 */
