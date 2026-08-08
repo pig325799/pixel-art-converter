@@ -1,5 +1,11 @@
 <script setup>
+import { onMounted } from 'vue'
 import PixelConverter from './components/PixelConverter.vue'
+import { injectSpeedInsights } from '@vercel/speed-insights'
+
+onMounted(() => {
+  injectSpeedInsights()
+})
 </script>
 
 <template>
