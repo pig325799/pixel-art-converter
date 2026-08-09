@@ -15,6 +15,7 @@ const previewWrapRef = ref(null)
 const hasImage = ref(false)
 const zoomPercent = ref(100)
 const maxColors = ref(4)
+const showNumbers = ref(false)
 const blockIndices = ref([])
 const previewReady = ref(false)
 const sourceInfo = ref({ w: 0, h: 0 })
@@ -51,6 +52,13 @@ const previewStats = computed(() => {
     topColor: top,
     topPercent: Math.round((topN / arr.length) * 100)
   }
+})
+
+/* ---------------- 已使用颜色集合（用于调色板高亮） ---------------- */
+const usedColorSet = computed(() => {
+  const set = new Set()
+  for (const c of blockIndices.value) set.add(c)
+  return set
 })
 
 /* ---------------- 内部变量 ---------------- */
@@ -365,6 +373,15 @@ function renderPreview() {
         ctx.fillRect(x, y + h - 1, w, 1)
         ctx.fillRect(x + w - 1, y, 1, h)
       }
+      // 显示色块编号
+      if (showNumbers.value && cell >= 8) {
+        const num = idx + 1
+        ctx.fillStyle = 'rgba(0,0,0,0.55)'
+        ctx.font = `${Math.floor(cell * 0.35)}px monospace`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(num, x + w / 2, y + h / 2)
+      }
     }
   }
 
@@ -514,6 +531,11 @@ function setColorCount(n) {
   if (hasImage.value) render()
 }
 
+function toggleNumbers() {
+  showNumbers.value = !showNumbers.value
+  if (hasImage.value) render()
+}
+
 /* ---------------- 下载 ---------------- */
 function downloadPng() {
   if (!previewReady.value) return
@@ -619,6 +641,14 @@ const colorCount = PALETTE.length
           <button class="btn soft" @click="resetView">
             <span class="btn-icon">⟲</span>
             <span>重置</span>
+          </button>
+          <button
+            class="btn"
+            :class="{ accent: showNumbers, soft: !showNumbers }"
+            @click="toggleNumbers"
+          >
+            <span class="btn-icon">#</span>
+            <span>{{ showNumbers ? '隐藏标号' : '显示标号' }}</span>
           </button>
           <button class="btn accent" @click="downloadPng">
             <span class="btn-icon">↓</span>
@@ -736,25 +766,22 @@ const colorCount = PALETTE.length
           </div>
         </div>
 
-        <!-- 调色板分组 -->
+        <!-- 调色板：1-40 平铺编号 -->
         <div class="palette-panel">
           <div class="palette-title">40 色调色板</div>
-          <div class="palette-groups">
+          <div class="palette-flat">
             <div
-              v-for="(g, gi) in paletteGroups"
-              :key="gi"
-              class="palette-group"
+              v-for="(hex, i) in PALETTE_HEX"
+              :key="i"
+              class="swatch-wrap"
             >
-              <div class="group-label" :data-hue="g.hue">{{ g.name }}</div>
-              <div class="group-swatches">
-                <div
-                  v-for="i in g.end - g.start"
-                  :key="i"
-                  class="swatch"
-                  :style="{ background: PALETTE_HEX[g.start + i - 1] }"
-                  :title="`#${g.start + i}`"
-                ></div>
-              </div>
+              <div
+                class="swatch"
+                :class="{ 'swatch-used': usedColorSet.has(i) }"
+                :style="{ background: hex }"
+                :title="`#${i + 1}`"
+              ></div>
+              <span class="swatch-num">{{ i + 1 }}</span>
             </div>
           </div>
         </div>
@@ -1324,62 +1351,53 @@ const colorCount = PALETTE.length
   background: linear-gradient(180deg, #6b8cff, #ff6b8a);
 }
 
-.palette-groups {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 14px;
+/* 1-40 平铺 */
+.palette-flat {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 6px 4px;
 }
 
-.palette-group {
+.swatch-wrap {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
-
-.group-label {
-  font-size: 10.5px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  color: #8690a6;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  align-self: flex-start;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.group-label[data-hue='mono'] { color: #bdc3d1; border-color: rgba(255,255,255,0.1); }
-.group-label[data-hue='red'] { color: #ff9fae; border-color: rgba(255,100,120,0.25); background: rgba(255,100,120,0.08); }
-.group-label[data-hue='orange'] { color: #ffc18a; border-color: rgba(255,170,100,0.25); background: rgba(255,170,100,0.08); }
-.group-label[data-hue='yellow'] { color: #fff3a8; border-color: rgba(255,230,120,0.25); background: rgba(255,230,120,0.08); }
-.group-label[data-hue='green'] { color: #9bf0b8; border-color: rgba(100,220,140,0.25); background: rgba(100,220,140,0.08); }
-.group-label[data-hue='cyan'] { color: #9be8ef; border-color: rgba(100,210,220,0.25); background: rgba(100,210,220,0.08); }
-.group-label[data-hue='blue'] { color: #a7c3ff; border-color: rgba(120,160,255,0.25); background: rgba(120,160,255,0.08); }
-.group-label[data-hue='purple'] { color: #d9b6ff; border-color: rgba(180,120,230,0.25); background: rgba(180,120,230,0.08); }
-.group-label[data-hue='brown'] { color: #d5a377; border-color: rgba(180,130,80,0.25); background: rgba(180,130,80,0.08); }
-
-.group-swatches {
-  display: flex;
-  gap: 3px;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
 }
 
 .swatch {
-  width: 20px;
-  height: 20px;
+  width: 100%;
+  aspect-ratio: 1;
+  max-width: 28px;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.08),
     0 1px 2px rgba(0, 0, 0, 0.25);
   transition: transform 0.12s ease, box-shadow 0.12s ease;
+  opacity: 0.4;
+}
+.swatch-used {
+  opacity: 1;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+    0 0 6px rgba(120, 175, 255, 0.4),
+    0 1px 2px rgba(0, 0, 0, 0.25);
 }
 .swatch:hover {
   transform: scale(1.15) translateY(-1px);
   z-index: 2;
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.2),
-    0 3px 8px rgba(0, 0, 0, 0.45);
+  opacity: 1;
+}
+
+.swatch-num {
+  font-size: 9px;
+  color: #616a80;
+  font-variant-numeric: tabular-nums;
+  font-family: monospace;
+}
+.swatch-used + .swatch-num {
+  color: #9fc2ff;
 }
 
 /* 小屏自适应 */
@@ -1528,16 +1546,15 @@ const colorCount = PALETTE.length
   .palette-panel {
     padding: 10px 12px 12px;
   }
-  .palette-groups {
-    gap: 8px 10px;
+  .palette-flat {
+    grid-template-columns: repeat(8, 1fr);
+    gap: 4px 3px;
   }
   .swatch {
-    width: 17px;
-    height: 17px;
-    border-radius: 3px;
+    max-width: 22px;
   }
-  .group-label {
-    font-size: 10px;
+  .swatch-num {
+    font-size: 8px;
   }
 }
 
