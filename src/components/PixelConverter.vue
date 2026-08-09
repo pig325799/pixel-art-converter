@@ -20,6 +20,7 @@ const hasImage = ref(false)
 const zoomPercent = ref(100)
 const maxColors = ref(4)
 const showNumbers = ref(false)
+const showGrid = ref(false)
 const algorithm = ref('dominant')
 
 const algorithms = [
@@ -388,6 +389,41 @@ function renderPreview() {
     }
   }
 
+  // 坐标网格（拼豆图样式）
+  if (showGrid.value) {
+    ctx.save()
+    // 1. 每格细线
+    ctx.strokeStyle = 'rgba(120, 120, 120, 0.45)'
+    ctx.lineWidth = Math.max(0.5, cell * 0.04)
+    for (let i = 1; i < BLOCK_SIZE; i++) {
+      ctx.beginPath()
+      ctx.moveTo(px + i * cell, py)
+      ctx.lineTo(px + i * cell, py + size)
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.moveTo(px, py + i * cell)
+      ctx.lineTo(px + size, py + i * cell)
+      ctx.stroke()
+    }
+    // 2. 每 12 格粗十字（24×24 分成 4 象限）
+    ctx.strokeStyle = 'rgba(40, 40, 40, 0.85)'
+    ctx.lineWidth = Math.max(1, cell * 0.12)
+    const midLine = BLOCK_SIZE / 2
+    ctx.beginPath()
+    ctx.moveTo(px + midLine * cell, py)
+    ctx.lineTo(px + midLine * cell, py + size)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(px, py + midLine * cell)
+    ctx.lineTo(px + size, py + midLine * cell)
+    ctx.stroke()
+    // 3. 外粗边框
+    ctx.strokeStyle = 'rgba(20, 20, 20, 0.95)'
+    ctx.lineWidth = Math.max(1.5, cell * 0.2)
+    ctx.strokeRect(px, py, size, size)
+    ctx.restore()
+  }
+
   // 外层亮边
   ctx.save()
   ctx.strokeStyle = 'rgba(255,255,255,0.08)'
@@ -544,18 +580,33 @@ function toggleNumbers() {
   if (hasImage.value) render()
 }
 
+function toggleGrid() {
+  showGrid.value = !showGrid.value
+  if (hasImage.value) render()
+}
+
 /* ---------------- 下载 ---------------- */
 function downloadPng() {
   if (!previewReady.value) return
-  downloadCanvas(false)
+  downloadCanvas(false, false)
 }
 
 function downloadNumbered() {
   if (!previewReady.value) return
-  downloadCanvas(true)
+  downloadCanvas(true, false)
 }
 
-function downloadCanvas(withNumbers) {
+function downloadGrid() {
+  if (!previewReady.value) return
+  downloadCanvas(false, true)
+}
+
+function downloadNumberedGrid() {
+  if (!previewReady.value) return
+  downloadCanvas(true, true)
+}
+
+function downloadCanvas(withNumbers, withGrid) {
   const out = document.createElement('canvas')
   const upscale = 32
   out.width = BLOCK_SIZE * upscale
@@ -579,8 +630,48 @@ function downloadCanvas(withNumbers) {
       }
     }
   }
+
+  // 坐标网格
+  if (withGrid) {
+    ctx.save()
+    // 1. 每格细线
+    ctx.strokeStyle = 'rgba(120, 120, 120, 0.5)'
+    ctx.lineWidth = Math.max(1, upscale * 0.04)
+    for (let i = 1; i < BLOCK_SIZE; i++) {
+      ctx.beginPath()
+      ctx.moveTo(i * upscale, 0)
+      ctx.lineTo(i * upscale, BLOCK_SIZE * upscale)
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.moveTo(0, i * upscale)
+      ctx.lineTo(BLOCK_SIZE * upscale, i * upscale)
+      ctx.stroke()
+    }
+    // 2. 每 12 格粗十字
+    ctx.strokeStyle = 'rgba(40, 40, 40, 0.9)'
+    ctx.lineWidth = Math.max(2, upscale * 0.12)
+    const mid = BLOCK_SIZE / 2 * upscale
+    ctx.beginPath()
+    ctx.moveTo(mid, 0)
+    ctx.lineTo(mid, BLOCK_SIZE * upscale)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(0, mid)
+    ctx.lineTo(BLOCK_SIZE * upscale, mid)
+    ctx.stroke()
+    // 3. 外粗边框
+    ctx.strokeStyle = 'rgba(20, 20, 20, 1)'
+    ctx.lineWidth = Math.max(3, upscale * 0.2)
+    ctx.strokeRect(0, 0, BLOCK_SIZE * upscale, BLOCK_SIZE * upscale)
+    ctx.restore()
+  }
+
   const a = document.createElement('a')
-  a.download = withNumbers ? 'pixel-art-numbered.png' : 'pixel-art.png'
+  let fname = 'pixel-art'
+  if (withNumbers && withGrid) fname = 'pixel-art-numbered-grid'
+  else if (withNumbers) fname = 'pixel-art-numbered'
+  else if (withGrid) fname = 'pixel-art-grid'
+  a.download = fname + '.png'
   a.href = out.toDataURL('image/png')
   a.click()
 }
@@ -692,13 +783,32 @@ const colorCount = PALETTE.length
             <span class="btn-icon">#</span>
             <span>{{ showNumbers ? '隐藏标号' : '显示标号' }}</span>
           </button>
+          <button
+            class="btn"
+            :class="{ accent: showGrid, soft: !showGrid }"
+            @click="toggleGrid"
+          >
+            <span class="btn-icon">⊞</span>
+            <span>{{ showGrid ? '隐藏网格' : '显示网格' }}</span>
+          </button>
+        </div>
+
+        <div class="tool-group">
           <button class="btn accent" @click="downloadPng">
             <span class="btn-icon">↓</span>
             <span>下载像素画</span>
           </button>
           <button class="btn accent" @click="downloadNumbered">
             <span class="btn-icon">#</span>
-            <span>下载标号版</span>
+            <span>标号版</span>
+          </button>
+          <button class="btn accent" @click="downloadGrid">
+            <span class="btn-icon">⊞</span>
+            <span>网格版</span>
+          </button>
+          <button class="btn accent" @click="downloadNumberedGrid">
+            <span class="btn-icon">⊡</span>
+            <span>标号+网格</span>
           </button>
         </div>
       </template>
