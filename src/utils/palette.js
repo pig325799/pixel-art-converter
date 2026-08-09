@@ -150,49 +150,48 @@ export function sampleToBlockIndices(
 }
 
 /**
- * 去噪后处理：消除孤立色块。
- * 如果一个色块和周围 8 邻居的主导色不同，且主导色邻居数 >= 阈值，
- * 则将该色块替换为邻居主导色。
- * 执行多轮以逐步消除噪点。
+ * 去噪后处理：消除完全孤立的单点噪点。
+ * 只处理周围 8 邻居颜色完全一致、且与当前颜色不同的情况（真正的“孤点”），
+ * 以此保护线条和细节，避免过度平滑导致特征丢失。
  */
-export function denoiseIndices(indices, blockSize, threshold = 5, rounds = 2) {
+export function denoiseIndices(indices, blockSize) {
   let result = indices.slice()
-  for (let round = 0; round < rounds; round++) {
-    const next = result.slice()
-    for (let by = 0; by < blockSize; by++) {
-      for (let bx = 0; bx < blockSize; bx++) {
-        const idx = by * blockSize + bx
-        const current = result[idx]
-        // 统计周围 8 邻居
-        const neighborCounts = new Map()
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue
-            const nx = bx + dx
-            const ny = by + dy
-            if (nx < 0 || ny < 0 || nx >= blockSize || ny >= blockSize) continue
-            const nIdx = result[ny * blockSize + nx]
-            neighborCounts.set(nIdx, (neighborCounts.get(nIdx) || 0) + 1)
+  const next = result.slice()
+  for (let by = 0; by < blockSize; by++) {
+    for (let bx = 0; bx < blockSize; bx++) {
+      const idx = by * blockSize + bx
+      const current = result[idx]
+      
+      // 统计周围 8 邻居
+      let neighborColor = -1
+      let isIsolated = true
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue
+          const nx = bx + dx
+          const ny = by + dy
+          if (nx < 0 || ny < 0 || nx >= blockSize || ny >= blockSize) {
+            isIsolated = false // 边缘不算孤立
+            break
+          }
+          const nIdx = result[ny * blockSize + nx]
+          if (neighborColor === -1) {
+            neighborColor = nIdx
+          } else if (nIdx !== neighborColor) {
+            isIsolated = false
+            break
           }
         }
-        // 找邻居主导色
-        let dominantNeighbor = current
-        let maxCount = 0
-        for (const [nIdx, count] of neighborCounts) {
-          if (count > maxCount) {
-            maxCount = count
-            dominantNeighbor = nIdx
-          }
-        }
-        // 如果当前色不同于邻居主导色且主导色足够强，则替换
-        if (current !== dominantNeighbor && maxCount >= threshold) {
-          next[idx] = dominantNeighbor
-        }
+        if (!isIsolated) break
+      }
+      
+      // 如果是完全孤立的点，替换为邻居颜色
+      if (isIsolated && neighborColor !== -1 && current !== neighborColor) {
+        next[idx] = neighborColor
       }
     }
-    result = next
   }
-  return result
+  return next
 }
 
 /**
@@ -254,12 +253,20 @@ export function reduceColors(indices, maxColors) {
     clusters.push(merged)
   }
 
-  // 构建映射表
+  // 构建映射表：强制将所有颜色映射到调色板中距离最近的保留色
+  const keptReps = clusters.map(c => c.repIdx)
   const mapping = new Map()
-  for (const cluster of clusters) {
-    for (const idx of cluster.members) {
-      mapping.set(idx, cluster.repIdx)
+  for (const origIdx of counts.keys()) {
+    let bestRepIdx = origIdx
+    let bestDist = Infinity
+    for (const repIdx of keptReps) {
+      const d = colorDist(origIdx, repIdx)
+      if (d < bestDist) {
+        bestDist = d
+        bestRepIdx = repIdx
+      }
     }
+    mapping.set(origIdx, bestRepIdx)
   }
 
   return indices.map(idx => mapping.get(idx) ?? idx)
