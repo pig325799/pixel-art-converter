@@ -2,9 +2,9 @@
 export const PALETTE = [
   // 灰阶 (4)
   [39, 39, 39],
-  [39, 39, 40],
-  [39, 39, 41],
-  [39, 39, 48],
+  [179, 179, 179],
+  [234, 230, 222],
+  [255, 255, 255],
   // 红 (4)
   [210, 51, 57],
   [154, 18, 0],
@@ -244,6 +244,226 @@ export function sampleToBlockIndices(
         Math.round(finalG),
         Math.round(finalB)
       )
+    }
+  }
+  return result
+}
+
+// ============================================================
+// 多种像素化算法
+// ============================================================
+
+/**
+ * 算法 1：平均色（最简单）
+ * 每个块取所有像素的算术平均，再映射到调色板。
+ * 效果：平滑但容易丢细节，渐变区域表现好。
+ */
+export function sampleAverage(imageData, sx, sy, sw, sh, blockSize) {
+  const { data, width: imgW, height: imgH } = imageData
+  const result = new Array(blockSize * blockSize)
+  const cellW = sw / blockSize
+  const cellH = sh / blockSize
+
+  for (let by = 0; by < blockSize; by++) {
+    for (let bx = 0; bx < blockSize; bx++) {
+      const x0 = Math.floor(sx + bx * cellW)
+      const y0 = Math.floor(sy + by * cellH)
+      const x1 = Math.floor(sx + (bx + 1) * cellW)
+      const y1 = Math.floor(sy + (by + 1) * cellH)
+
+      let sumR = 0, sumG = 0, sumB = 0, n = 0
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0; px < x1; px++) {
+          if (px < 0 || py < 0 || px >= imgW || py >= imgH) continue
+          const idx = (py * imgW + px) * 4
+          if (data[idx + 3] < 128) continue
+          sumR += data[idx]; sumG += data[idx + 1]; sumB += data[idx + 2]; n++
+        }
+      }
+      if (n === 0) { result[by * blockSize + bx] = nearestColorIndex(255, 255, 255); continue }
+      result[by * blockSize + bx] = nearestColorIndex(
+        Math.round(sumR / n), Math.round(sumG / n), Math.round(sumB / n)
+      )
+    }
+  }
+  return result
+}
+
+/**
+ * 算法 2：中值色
+ * 每个块取所有像素 RGB 各通道的中值。
+ * 效果：抗噪能力强，适合有压缩噪点的图片。
+ */
+export function sampleMedian(imageData, sx, sy, sw, sh, blockSize) {
+  const { data, width: imgW, height: imgH } = imageData
+  const result = new Array(blockSize * blockSize)
+  const cellW = sw / blockSize
+  const cellH = sh / blockSize
+
+  for (let by = 0; by < blockSize; by++) {
+    for (let bx = 0; bx < blockSize; bx++) {
+      const x0 = Math.floor(sx + bx * cellW)
+      const y0 = Math.floor(sy + by * cellH)
+      const x1 = Math.floor(sx + (bx + 1) * cellW)
+      const y1 = Math.floor(sy + (by + 1) * cellH)
+
+      const rs = [], gs = [], bs = []
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0; px < x1; px++) {
+          if (px < 0 || py < 0 || px >= imgW || py >= imgH) continue
+          const idx = (py * imgW + px) * 4
+          if (data[idx + 3] < 128) continue
+          rs.push(data[idx]); gs.push(data[idx + 1]); bs.push(data[idx + 2])
+        }
+      }
+      if (rs.length === 0) { result[by * blockSize + bx] = nearestColorIndex(255, 255, 255); continue }
+      rs.sort((a, b) => a - b); gs.sort((a, b) => a - b); bs.sort((a, b) => a - b)
+      const mid = Math.floor(rs.length / 2)
+      result[by * blockSize + bx] = nearestColorIndex(rs[mid], gs[mid], bs[mid])
+    }
+  }
+  return result
+}
+
+/**
+ * 算法 3：K-Means 聚类
+ * 每个块内做 K=3 的聚类，取最大簇的中心色。
+ * 效果：能分离前景/背景，保留特征。
+ */
+export function sampleKMeans(imageData, sx, sy, sw, sh, blockSize) {
+  const { data, width: imgW, height: imgH } = imageData
+  const result = new Array(blockSize * blockSize)
+  const cellW = sw / blockSize
+  const cellH = sh / blockSize
+  const K = 3
+  const ITER = 5
+
+  for (let by = 0; by < blockSize; by++) {
+    for (let bx = 0; bx < blockSize; bx++) {
+      const x0 = Math.floor(sx + bx * cellW)
+      const y0 = Math.floor(sy + by * cellH)
+      const x1 = Math.floor(sx + (bx + 1) * cellW)
+      const y1 = Math.floor(sy + (by + 1) * cellH)
+
+      const pixels = []
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0; px < x1; px++) {
+          if (px < 0 || py < 0 || px >= imgW || py >= imgH) continue
+          const idx = (py * imgW + px) * 4
+          if (data[idx + 3] < 128) continue
+          pixels.push([data[idx], data[idx + 1], data[idx + 2]])
+        }
+      }
+      if (pixels.length === 0) { result[by * blockSize + bx] = nearestColorIndex(255, 255, 255); continue }
+      if (pixels.length <= K) {
+        let sr = 0, sg = 0, sb = 0
+        for (const [r, g, b] of pixels) { sr += r; sg += g; sb += b }
+        result[by * blockSize + bx] = nearestColorIndex(
+          Math.round(sr / pixels.length), Math.round(sg / pixels.length), Math.round(sb / pixels.length)
+        )
+        continue
+      }
+
+      // 初始化：均匀采样 K 个中心
+      const centers = []
+      for (let i = 0; i < K; i++) {
+        centers.push(pixels[Math.floor(i * pixels.length / K)].slice())
+      }
+      const counts = new Array(K).fill(0)
+
+      for (let iter = 0; iter < ITER; iter++) {
+        const sums = Array.from({ length: K }, () => [0, 0, 0])
+        counts.fill(0)
+        for (const [r, g, b] of pixels) {
+          let bestK = 0, bestD = Infinity
+          for (let k = 0; k < K; k++) {
+            const d = (r - centers[k][0]) ** 2 + (g - centers[k][1]) ** 2 + (b - centers[k][2]) ** 2
+            if (d < bestD) { bestD = d; bestK = k }
+          }
+          sums[bestK][0] += r; sums[bestK][1] += g; sums[bestK][2] += b
+          counts[bestK]++
+        }
+        for (let k = 0; k < K; k++) {
+          if (counts[k] > 0) {
+            centers[k][0] = sums[k][0] / counts[k]
+            centers[k][1] = sums[k][1] / counts[k]
+            centers[k][2] = sums[k][2] / counts[k]
+          }
+        }
+      }
+
+      // 取最大簇
+      let bestK = 0
+      for (let k = 1; k < K; k++) if (counts[k] > counts[bestK]) bestK = k
+      result[by * blockSize + bx] = nearestColorIndex(
+        Math.round(centers[bestK][0]), Math.round(centers[bestK][1]), Math.round(centers[bestK][2])
+      )
+    }
+  }
+  return result
+}
+
+/**
+ * 算法 4：Floyd-Steinberg 抖动
+ * 先降采样到 blockSize×blockSize，再做误差扩散抖动。
+ * 效果：保留更多颜色细节和过渡，有颗粒感。
+ */
+export function sampleFloydSteinberg(imageData, sx, sy, sw, sh, blockSize) {
+  const { data, width: imgW, height: imgH } = imageData
+  const cellW = sw / blockSize
+  const cellH = sh / blockSize
+
+  // 先降采样到一个 blockSize×blockSize 的浮点缓冲
+  const buf = new Float32Array(blockSize * blockSize * 3)
+  const cnt = new Int32Array(blockSize * blockSize)
+
+  for (let py = 0; py < imgH; py++) {
+    for (let px = 0; px < imgW; px++) {
+      // 只处理选区内
+      const relX = px - sx
+      const relY = py - sy
+      if (relX < 0 || relY < 0 || relX >= sw || relY >= sh) continue
+      const idx = (py * imgW + px) * 4
+      if (data[idx + 3] < 128) continue
+      const bx = Math.min(blockSize - 1, Math.floor(relX / cellW))
+      const by = Math.min(blockSize - 1, Math.floor(relY / cellH))
+      const bi = (by * blockSize + bx) * 3
+      buf[bi] += data[idx]; buf[bi + 1] += data[idx + 1]; buf[bi + 2] += data[idx + 2]
+      cnt[by * blockSize + bx]++
+    }
+  }
+
+  // 求平均
+  for (let i = 0; i < blockSize * blockSize; i++) {
+    if (cnt[i] > 0) { buf[i * 3] /= cnt[i]; buf[i * 3 + 1] /= cnt[i]; buf[i * 3 + 2] /= cnt[i] }
+    else { buf[i * 3] = 255; buf[i * 3 + 1] = 255; buf[i * 3 + 2] = 255 }
+  }
+
+  // Floyd-Steinberg 误差扩散
+  const result = new Array(blockSize * blockSize)
+  for (let by = 0; by < blockSize; by++) {
+    for (let bx = 0; bx < blockSize; bx++) {
+      const bi = (by * blockSize + bx) * 3
+      const r = buf[bi], g = buf[bi + 1], b = buf[bi + 2]
+      const ci = nearestColorIndex(
+        Math.max(0, Math.min(255, Math.round(r))),
+        Math.max(0, Math.min(255, Math.round(g))),
+        Math.max(0, Math.min(255, Math.round(b)))
+      )
+      result[by * blockSize + bx] = ci
+      const [pr, pg, pb] = PALETTE[ci]
+      const errR = r - pr, errG = g - pg, errB = b - pb
+
+      // 扩散到右、下、左下、右下
+      const spread = (nx, ny, w) => {
+        if (nx < 0 || ny < 0 || nx >= blockSize || ny >= blockSize) return
+        const ni = (ny * blockSize + nx) * 3
+        buf[ni] += errR * w; buf[ni + 1] += errG * w; buf[ni + 2] += errB * w
+      }
+      spread(bx + 1, by, 7 / 16)
+      spread(bx - 1, by + 1, 3 / 16)
+      spread(bx, by + 1, 5 / 16)
+      spread(bx + 1, by + 1, 1 / 16)
     }
   }
   return result

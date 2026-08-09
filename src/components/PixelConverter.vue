@@ -1,6 +1,10 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { PALETTE, PALETTE_HEX, sampleToBlockIndices, reduceColors, denoiseIndices } from '../utils/palette.js'
+import {
+  PALETTE, PALETTE_HEX,
+  sampleToBlockIndices, sampleAverage, sampleMedian, sampleKMeans, sampleFloydSteinberg,
+  reduceColors, denoiseIndices
+} from '../utils/palette.js'
 
 const BLOCK_SIZE = 24
 
@@ -16,6 +20,15 @@ const hasImage = ref(false)
 const zoomPercent = ref(100)
 const maxColors = ref(4)
 const showNumbers = ref(false)
+const algorithm = ref('dominant')
+
+const algorithms = [
+  { id: 'dominant', name: '主导色', desc: '方差判断+边缘加权' },
+  { id: 'average', name: '平均色', desc: '纯平均，平滑' },
+  { id: 'median', name: '中值色', desc: '抗噪，适合压缩图' },
+  { id: 'kmeans', name: 'K-Means', desc: '聚类分离前景背景' },
+  { id: 'dither', name: '抖动', desc: 'Floyd-Steinberg 误差扩散' }
+]
 const blockIndices = ref([])
 const previewReady = ref(false)
 const sourceInfo = ref({ w: 0, h: 0 })
@@ -329,18 +342,20 @@ function renderPreview() {
   const sw = frameSize / scale
   const sh = frameSize / scale
 
-  const indices = sampleToBlockIndices(
-    sourceImageData,
-    sx,
-    sy,
-    sw,
-    sh,
-    BLOCK_SIZE
-  )
-  // 去噪：消除采样产生的孤立色块
-  const denoised = denoiseIndices(indices, BLOCK_SIZE)
-  // 降色：层级聚类合并到目标颜色数
-  const reduced = reduceColors(denoised, maxColors.value)
+  const indices = (() => {
+    const args = [sourceImageData, sx, sy, sw, sh, BLOCK_SIZE]
+    switch (algorithm.value) {
+      case 'average': return sampleAverage(...args)
+      case 'median': return sampleMedian(...args)
+      case 'kmeans': return sampleKMeans(...args)
+      case 'dither': return sampleFloydSteinberg(...args)
+      default: return sampleToBlockIndices(...args)
+    }
+  })()
+  // 去噪：消除采样产生的孤立色块（抖动算法跳过去噪）
+  const denoised = algorithm.value === 'dither' ? indices : denoiseIndices(indices, BLOCK_SIZE)
+  // 降色：层级聚类合并到目标颜色数（抖动算法跳过降色）
+  const reduced = algorithm.value === 'dither' ? denoised : reduceColors(denoised, maxColors.value)
   blockIndices.value = reduced
   previewReady.value = true
 
@@ -531,6 +546,11 @@ function setColorCount(n) {
   if (hasImage.value) render()
 }
 
+function setAlgorithm(id) {
+  algorithm.value = id
+  if (hasImage.value) render()
+}
+
 function toggleNumbers() {
   showNumbers.value = !showNumbers.value
   if (hasImage.value) render()
@@ -652,6 +672,21 @@ const colorCount = PALETTE.length
             :class="{ active: maxColors === n }"
             @click="setColorCount(n)"
           >{{ n }}</button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="tool-group algo-controls">
+          <span class="color-label">算法</span>
+          <select
+            class="algo-select"
+            :value="algorithm"
+            @change="setAlgorithm($event.target.value)"
+          >
+            <option v-for="a in algorithms" :key="a.id" :value="a.id">
+              {{ a.name }} — {{ a.desc }}
+            </option>
+          </select>
         </div>
 
         <div class="divider"></div>
@@ -985,6 +1020,40 @@ const colorCount = PALETTE.length
   border-color: rgba(150, 175, 255, 0.5);
   color: #fff;
   box-shadow: 0 2px 8px rgba(90, 120, 255, 0.4);
+}
+
+/* 算法选择器 */
+.algo-controls {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 5px 10px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.algo-select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #d5dae8;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 8px;
+  cursor: pointer;
+  outline: none;
+  max-width: 220px;
+  transition: border-color 0.15s ease;
+}
+.algo-select:hover {
+  border-color: rgba(150, 175, 255, 0.4);
+}
+.algo-select:focus {
+  border-color: rgba(120, 160, 255, 0.6);
+}
+.algo-select option {
+  background: #1a1f2e;
+  color: #d5dae8;
 }
 
 /* 缩放滑块 */
@@ -1469,6 +1538,13 @@ const colorCount = PALETTE.length
   }
   .toolbar .color-controls {
     padding: 4px 8px;
+  }
+  .toolbar .algo-controls {
+    padding: 4px 8px;
+  }
+  .algo-select {
+    max-width: 140px;
+    font-size: 11px;
   }
   .toolbar .zoom-controls {
     padding: 4px 6px;
