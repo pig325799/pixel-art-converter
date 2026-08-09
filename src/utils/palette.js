@@ -107,10 +107,11 @@ export function nearestColorIndex(r, g, b) {
 /**
  * 采样为 blockSize x blockSize 的调色板索引数组。
  *
- * 混合策略：
- * - 每个块先做 16 级粗量化分桶；
- * - 如果第一大桶的占比 >= DOMINANT_RATIO_THRESH（0.45），则用该桶代表色；
- * - 否则（多色混合区域），使用整区域真实平均色，避免边缘色被强制拉向错误主导色。
+ * 特征提取增强：
+ * 1. 预计算整幅源区域的边缘强度图（Sobel 算子，基于灰度梯度）；
+ * 2. 采样时对每个像素根据其边缘强度分配权重：边缘像素（五官/轮廓）
+ *    权重更大，从而在分桶统计和平均色计算中保留特征，避免被皮肤大色块"淹没"；
+ * 3. 混合策略：主色明确（≥ 45%）时用主色桶，否则用加权平均色。
  */
 const DOMINANT_RATIO_THRESH = 0.45
 
@@ -127,6 +128,62 @@ export function sampleToBlockIndices(
   const cellW = sw / blockSize
   const cellH = sh / blockSize
 
+  // ---------- 预计算边缘强度图 ----------
+  // 将采样区域离散到整数网格，计算每个像素的灰度梯度
+  const gridX0 = Math.floor(sx)
+  const gridY0 = Math.floor(sy)
+  const gridX1 = Math.ceil(sx + sw)
+  const gridY1 = Math.ceil(sy + sh)
+  const gw = gridX1 - gridX0
+  const gh = gridY1 - gridY0
+  const edge = new Float32Array(gw * gh) // 边缘强度 [0, 1]
+
+  // 先算每个像素的灰度
+  const gray = new Float32Array(gw * gh)
+  for (let y = gridY0; y < gridY1; y++) {
+    for (let x = gridX0; x < gridX1; x++) {
+      const gi = (y - gridY0) * gw + (x - gridX0)
+      if (x < 0 || y < 0 || x >= imgW || y >= imgH) {
+        gray[gi] = 0
+        continue
+      }
+      const idx = (y * imgW + x) * 4
+      const alpha = data[idx + 3] / 255
+      if (alpha < 0.5) {
+        gray[gi] = 0
+      } else {
+        gray[gi] = (0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]) * alpha
+      }
+    }
+  }
+
+  // Sobel 算子计算梯度强度，并归一化到 [0, 1]
+  let maxG = 0
+  const gx = new Float32Array(gw * gh)
+  const gy = new Float32Array(gw * gh)
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      const idx = y * gw + x
+      const vx =
+        -gray[idx - gw - 1] + gray[idx - gw + 1] +
+        -2 * gray[idx - 1] + 2 * gray[idx + 1] +
+        -gray[idx + gw - 1] + gray[idx + gw + 1]
+      const vy =
+        -gray[idx - gw - 1] - 2 * gray[idx - gw] - gray[idx - gw + 1] +
+        gray[idx + gw - 1] + 2 * gray[idx + gw] + gray[idx + gw + 1]
+      gx[idx] = vx
+      gy[idx] = vy
+      const mag = Math.sqrt(vx * vx + vy * vy)
+      edge[idx] = mag
+      if (mag > maxG) maxG = mag
+    }
+  }
+  // 归一化
+  if (maxG > 0) {
+    for (let i = 0; i < edge.length; i++) edge[i] /= maxG
+  }
+
+  // ---------- 按块采样（加权） ----------
   for (let by = 0; by < blockSize; by++) {
     for (let bx = 0; bx < blockSize; bx++) {
       const x0 = Math.floor(sx + bx * cellW)
@@ -135,35 +192,42 @@ export function sampleToBlockIndices(
       const y1 = Math.floor(sy + (by + 1) * cellH)
 
       const buckets = new Map()
-      let totalPicked = 0
-      let avgR = 0, avgG = 0, avgB = 0
+      let totalWeighted = 0
+      let sumR = 0, sumG = 0, sumB = 0
 
       for (let py = y0; py < y1; py++) {
         for (let px = x0; px < x1; px++) {
           if (px < 0 || py < 0 || px >= imgW || py >= imgH) continue
+          const gi = (py - gridY0) * gw + (px - gridX0)
           const idx = (py * imgW + px) * 4
           const alpha = data[idx + 3]
           if (alpha < 128) continue
           const r = data[idx]
           const g = data[idx + 1]
           const b = data[idx + 2]
-          // 分桶从 32 级细化到 16 级（每通道 16 档，共 4096 桶）
-          const key = (r >> 4) * 256 + (g >> 4) * 16 + (b >> 4)
-          if (!buckets.has(key)) {
-            buckets.set(key, { r: 0, g: 0, b: 0, count: 0 })
+          // 边缘权重：边缘越强权重越大，范围 [1, 3]
+          // 边缘像素权重最多是普通像素的 3 倍，防止被大色块淹没
+          const w = 1 + edge[gi] * 2
+          const bucketKey = (r >> 4) * 256 + (g >> 4) * 16 + (b >> 4)
+          if (!buckets.has(bucketKey)) {
+            buckets.set(bucketKey, { r: 0, g: 0, b: 0, count: 0 })
           }
-          const bucket = buckets.get(key)
-          bucket.r += r; bucket.g += g; bucket.b += b; bucket.count++
-          avgR += r; avgG += g; avgB += b
-          totalPicked++
+          const bucket = buckets.get(bucketKey)
+          bucket.r += r * w
+          bucket.g += g * w
+          bucket.b += b * w
+          bucket.count += w
+          sumR += r * w
+          sumG += g * w
+          sumB += b * w
+          totalWeighted += w
         }
       }
 
       let r, g, b
-      if (buckets.size === 0) {
+      if (totalWeighted === 0) {
         r = g = b = 255
       } else {
-        // 选主导桶
         let bestBucket = null, bestCount = 0
         for (const bucket of buckets.values()) {
           if (bucket.count > bestCount) {
@@ -171,17 +235,15 @@ export function sampleToBlockIndices(
             bestBucket = bucket
           }
         }
-        const dominantRatio = bestCount / totalPicked
+        const dominantRatio = bestCount / totalWeighted
         if (dominantRatio >= DOMINANT_RATIO_THRESH) {
-          // 主色明确，用主色桶平均
           r = bestBucket.r / bestCount
           g = bestBucket.g / bestCount
           b = bestBucket.b / bestCount
         } else {
-          // 多色混杂区（边缘/渐变），用真实平均色避免异常传播
-          r = avgR / totalPicked
-          g = avgG / totalPicked
-          b = avgB / totalPicked
+          r = sumR / totalWeighted
+          g = sumG / totalWeighted
+          b = sumB / totalWeighted
         }
       }
       result[by * blockSize + bx] = nearestColorIndex(r | 0, g | 0, b | 0)
