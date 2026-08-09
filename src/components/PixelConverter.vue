@@ -14,7 +14,7 @@ const previewWrapRef = ref(null)
 /* ---------------- 响应式状态 ---------------- */
 const hasImage = ref(false)
 const zoomPercent = ref(100)
-const maxColors = ref(16)
+const maxColors = ref(4)
 const blockIndices = ref([])
 const previewReady = ref(false)
 const sourceInfo = ref({ w: 0, h: 0 })
@@ -605,7 +605,7 @@ const colorCount = PALETTE.length
         <div class="tool-group color-controls">
           <span class="color-label">颜色数</span>
           <button
-            v-for="n in [8, 16, 24, 40]"
+            v-for="n in [4, 8, 16, 24, 40]"
             :key="n"
             class="btn chip"
             :class="{ active: maxColors === n }"
