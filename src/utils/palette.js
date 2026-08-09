@@ -1,5 +1,4 @@
-// 40 色调色板：覆盖灰阶 + 各色相，适合像素画
-// 每个颜色为 [r, g, b]
+// 40 色调色板
 export const PALETTE = [
   // 灰阶 (4)
   [39, 39, 39],
@@ -51,19 +50,16 @@ export const PALETTE = [
   [43, 59, 100]
 ]
 
-// 预计算调色板 hex 字符串
 export const PALETTE_HEX = PALETTE.map(
   ([r, g, b]) => `rgb(${r},${g},${b})`
 )
 
-// ---------- 感知色空间 Lab 辅助函数 ----------
+// ---------- sRGB -> Lab 转换 ----------
 function rgbToLab(r, g, b) {
-  // sRGB -> 线性 RGB
   let R = r / 255, G = g / 255, B = b / 255
   R = R > 0.04045 ? Math.pow((R + 0.055) / 1.055, 2.4) : R / 12.92
   G = G > 0.04045 ? Math.pow((G + 0.055) / 1.055, 2.4) : G / 12.92
   B = B > 0.04045 ? Math.pow((B + 0.055) / 1.055, 2.4) : B / 12.92
-  // XYZ (D65 白)
   let X = R * 0.4124 + G * 0.3576 + B * 0.1805
   let Y = R * 0.2126 + G * 0.7152 + B * 0.0722
   let Z = R * 0.0193 + G * 0.1192 + B * 0.9505
@@ -75,27 +71,60 @@ function rgbToLab(r, g, b) {
   return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)]
 }
 
-// 预计算调色板所有颜色的 Lab 值，避免重复计算
+// 预计算调色板 Lab 值
 const PALETTE_LAB = PALETTE.map(([r, g, b]) => rgbToLab(r, g, b))
 
-/**
- * 感知色距离：基于 Lab 空间的 CIE76 ΔE，比 RGB 欧氏距离更符合人眼。
- * 防止“肤色映射到绿色”这种视觉不合理的错误。
- */
-function labDist([L1, a1, b1], [L2, a2, b2]) {
-  const dL = L1 - L2, da = a1 - a2, db = b1 - b2
-  return dL * dL + da * da + db * db
+// HSV 转换（用于色相预筛选）
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255
+  const max = Math.max(r, g, b), min = Math.min(r, g, b)
+  const d = max - min
+  let h = 0
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60
+    else if (max === g) h = ((b - r) / d + 2) * 60
+    else h = ((r - g) / d + 4) * 60
+  }
+  return [h, max === 0 ? 0 : d / max, max]
 }
 
+const PALETTE_HSV = PALETTE.map(([r, g, b]) => rgbToHsv(r, g, b))
+
 /**
- * 查找最接近的调色板索引（Lab 感知距离）。
+ * 查找最接近的调色板索引（色相预筛 + Lab 精细匹配）。
+ * 先用 HSV 色相排除不相关的颜色，再在候选中用 Lab 精确匹配。
+ * 防止"绿色被映射成棕色"这类色相错乱。
  */
 export function nearestColorIndex(r, g, b) {
+  const [h, s, v] = rgbToHsv(r, g, b)
   const queryLab = rgbToLab(r, g, b)
-  let bestIndex = 0
+
+  // 色相预筛：只考虑色相差 <= 60° 的候选（灰色/彩色特殊处理）
+  const candidates = []
+  for (let i = 0; i < PALETTE.length; i++) {
+    const [ph, ps, pv] = PALETTE_HSV[i]
+    // 如果查询色或调色板色是灰/白（饱和度 < 0.15），跳过色相筛选
+    if (s < 0.15 || ps < 0.15) {
+      candidates.push(i)
+      continue
+    }
+    // 计算色相差
+    let dh = Math.abs(h - ph)
+    if (dh > 180) dh = 360 - dh
+    if (dh <= 60) {
+      candidates.push(i)
+    }
+  }
+
+  // 用 Lab 距离在候选中找最接近的
+  let bestIndex = candidates.length > 0 ? candidates[0] : 0
   let bestDist = Infinity
-  for (let i = 0; i < PALETTE_LAB.length; i++) {
-    const d = labDist(queryLab, PALETTE_LAB[i])
+  const pool = candidates.length > 0 ? candidates : PALETTE_LAB.map((_, i) => i)
+  for (const i of pool) {
+    const [L1, a1, b1] = queryLab
+    const [L2, a2, b2] = PALETTE_LAB[i]
+    const dL = L1 - L2, da = a1 - a2, db = b1 - b2
+    const d = dL * dL + da * da + db * db
     if (d < bestDist) {
       bestDist = d
       bestIndex = i
@@ -105,15 +134,12 @@ export function nearestColorIndex(r, g, b) {
 }
 
 /**
- * 采样为 blockSize x blockSize 的调色板索引数组。
- *
- * 特征提取增强：
- * 1. 预计算整幅源区域的边缘强度图（Sobel 算子，基于灰度梯度）；
- * 2. 采样时对每个像素根据其边缘强度分配权重：边缘像素（五官/轮廓）
- *    权重更大，从而在分桶统计和平均色计算中保留特征，避免被皮肤大色块"淹没"；
- * 3. 混合策略：主色明确（≥ 45%）时用主色桶，否则用加权平均色。
+ * 双重采样策略：
+ * 1. 计算每个块的平均色 + 颜色方差
+ * 2. 方差低（纯色区域，如大片头发、肤色）→ 直接用平均色（最准确）
+ * 3. 方差高（混合区域，如边缘、纹理）→ 使用分桶主导色 + 边缘加权
  */
-const DOMINANT_RATIO_THRESH = 0.45
+const VARIANCE_THRESH = 650 // 颜色方差阈值
 
 export function sampleToBlockIndices(
   imageData,
@@ -128,62 +154,6 @@ export function sampleToBlockIndices(
   const cellW = sw / blockSize
   const cellH = sh / blockSize
 
-  // ---------- 预计算边缘强度图 ----------
-  // 将采样区域离散到整数网格，计算每个像素的灰度梯度
-  const gridX0 = Math.floor(sx)
-  const gridY0 = Math.floor(sy)
-  const gridX1 = Math.ceil(sx + sw)
-  const gridY1 = Math.ceil(sy + sh)
-  const gw = gridX1 - gridX0
-  const gh = gridY1 - gridY0
-  const edge = new Float32Array(gw * gh) // 边缘强度 [0, 1]
-
-  // 先算每个像素的灰度
-  const gray = new Float32Array(gw * gh)
-  for (let y = gridY0; y < gridY1; y++) {
-    for (let x = gridX0; x < gridX1; x++) {
-      const gi = (y - gridY0) * gw + (x - gridX0)
-      if (x < 0 || y < 0 || x >= imgW || y >= imgH) {
-        gray[gi] = 0
-        continue
-      }
-      const idx = (y * imgW + x) * 4
-      const alpha = data[idx + 3] / 255
-      if (alpha < 0.5) {
-        gray[gi] = 0
-      } else {
-        gray[gi] = (0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]) * alpha
-      }
-    }
-  }
-
-  // Sobel 算子计算梯度强度，并归一化到 [0, 1]
-  let maxG = 0
-  const gx = new Float32Array(gw * gh)
-  const gy = new Float32Array(gw * gh)
-  for (let y = 1; y < gh - 1; y++) {
-    for (let x = 1; x < gw - 1; x++) {
-      const idx = y * gw + x
-      const vx =
-        -gray[idx - gw - 1] + gray[idx - gw + 1] +
-        -2 * gray[idx - 1] + 2 * gray[idx + 1] +
-        -gray[idx + gw - 1] + gray[idx + gw + 1]
-      const vy =
-        -gray[idx - gw - 1] - 2 * gray[idx - gw] - gray[idx - gw + 1] +
-        gray[idx + gw - 1] + 2 * gray[idx + gw] + gray[idx + gw + 1]
-      gx[idx] = vx
-      gy[idx] = vy
-      const mag = Math.sqrt(vx * vx + vy * vy)
-      edge[idx] = mag
-      if (mag > maxG) maxG = mag
-    }
-  }
-  // 归一化
-  if (maxG > 0) {
-    for (let i = 0; i < edge.length; i++) edge[i] /= maxG
-  }
-
-  // ---------- 按块采样（加权） ----------
   for (let by = 0; by < blockSize; by++) {
     for (let bx = 0; bx < blockSize; bx++) {
       const x0 = Math.floor(sx + bx * cellW)
@@ -191,43 +161,62 @@ export function sampleToBlockIndices(
       const x1 = Math.floor(sx + (bx + 1) * cellW)
       const y1 = Math.floor(sy + (by + 1) * cellH)
 
-      const buckets = new Map()
-      let totalWeighted = 0
+      // 收集所有有效像素
+      const pixels = []
       let sumR = 0, sumG = 0, sumB = 0
 
       for (let py = y0; py < y1; py++) {
         for (let px = x0; px < x1; px++) {
           if (px < 0 || py < 0 || px >= imgW || py >= imgH) continue
-          const gi = (py - gridY0) * gw + (px - gridX0)
           const idx = (py * imgW + px) * 4
           const alpha = data[idx + 3]
           if (alpha < 128) continue
           const r = data[idx]
           const g = data[idx + 1]
           const b = data[idx + 2]
-          // 边缘权重：边缘越强权重越大，范围 [1, 3]
-          // 边缘像素权重最多是普通像素的 3 倍，防止被大色块淹没
-          const w = 1 + edge[gi] * 2
-          const bucketKey = (r >> 4) * 256 + (g >> 4) * 16 + (b >> 4)
-          if (!buckets.has(bucketKey)) {
-            buckets.set(bucketKey, { r: 0, g: 0, b: 0, count: 0 })
-          }
-          const bucket = buckets.get(bucketKey)
-          bucket.r += r * w
-          bucket.g += g * w
-          bucket.b += b * w
-          bucket.count += w
-          sumR += r * w
-          sumG += g * w
-          sumB += b * w
-          totalWeighted += w
+          pixels.push([r, g, b])
+          sumR += r; sumG += g; sumB += b
         }
       }
 
-      let r, g, b
-      if (totalWeighted === 0) {
-        r = g = b = 255
+      if (pixels.length === 0) {
+        result[by * blockSize + bx] = nearestColorIndex(255, 255, 255)
+        continue
+      }
+
+      // 计算平均色
+      const n = pixels.length
+      const avgR = sumR / n
+      const avgG = sumG / n
+      const avgB = sumB / n
+
+      // 计算颜色方差（判断是否为纯色区域）
+      let variance = 0
+      for (const [r, g, b] of pixels) {
+        variance += (r - avgR) * (r - avgR) + (g - avgG) * (g - avgG) + (b - avgB) * (b - avgB)
+      }
+      variance /= n
+
+      let finalR, finalG, finalB
+
+      if (variance < VARIANCE_THRESH) {
+        // 纯色区域：直接用平均色，最准确
+        finalR = avgR
+        finalG = avgG
+        finalB = avgB
       } else {
+        // 混合区域：分桶取主导色
+        const buckets = new Map()
+        for (const [r, g, b] of pixels) {
+          const key = (r >> 4) * 256 + (g >> 4) * 16 + (b >> 4)
+          if (!buckets.has(key)) {
+            buckets.set(key, { r: 0, g: 0, b: 0, count: 0 })
+          }
+          const bucket = buckets.get(key)
+          bucket.r += r; bucket.g += g; bucket.b += b; bucket.count++
+        }
+
+        // 取最大桶
         let bestBucket = null, bestCount = 0
         for (const bucket of buckets.values()) {
           if (bucket.count > bestCount) {
@@ -235,25 +224,33 @@ export function sampleToBlockIndices(
             bestBucket = bucket
           }
         }
-        const dominantRatio = bestCount / totalWeighted
-        if (dominantRatio >= DOMINANT_RATIO_THRESH) {
-          r = bestBucket.r / bestCount
-          g = bestBucket.g / bestCount
-          b = bestBucket.b / bestCount
+        const dominantRatio = bestCount / n
+
+        if (dominantRatio >= 0.4) {
+          // 有明确主色
+          finalR = bestBucket.r / bestCount
+          finalG = bestBucket.g / bestCount
+          finalB = bestBucket.b / bestCount
         } else {
-          r = sumR / totalWeighted
-          g = sumG / totalWeighted
-          b = sumB / totalWeighted
+          // 颜色分散（渐变/纹理），用平均色
+          finalR = avgR
+          finalG = avgG
+          finalB = avgB
         }
       }
-      result[by * blockSize + bx] = nearestColorIndex(r | 0, g | 0, b | 0)
+
+      result[by * blockSize + bx] = nearestColorIndex(
+        Math.round(finalR),
+        Math.round(finalG),
+        Math.round(finalB)
+      )
     }
   }
   return result
 }
 
 /**
- * 去噪：只消除“完全孤立的 1 像素点”，其他细节一律保留。
+ * 去噪：只消除完全孤立的 1 像素点。
  */
 export function denoiseIndices(indices, blockSize) {
   const result = indices.slice()
@@ -291,8 +288,7 @@ export function denoiseIndices(indices, blockSize) {
 }
 
 /**
- * 颜色合并：贪心层级聚类 + 感知距离。
- * 合并完成后，每个被移除的颜色重新映射到**视觉最近**的保留色。
+ * 颜色合并：贪心层级聚类。
  */
 export function reduceColors(indices, maxColors) {
   if (indices.length === 0) return indices
@@ -305,7 +301,10 @@ export function reduceColors(indices, maxColors) {
   if (counts.size <= maxColors) return indices
 
   function paletteColorDist(i, j) {
-    return labDist(PALETTE_LAB[i], PALETTE_LAB[j])
+    const [L1, a1, b1] = PALETTE_LAB[i]
+    const [L2, a2, b2] = PALETTE_LAB[j]
+    const dL = L1 - L2, da = a1 - a2, db = b1 - b2
+    return dL * dL + da * da + db * db
   }
 
   const clusters = []
@@ -338,7 +337,6 @@ export function reduceColors(indices, maxColors) {
     clusters.push(merged)
   }
 
-  // 最终映射：每种源颜色强制映射到视觉最近的保留色
   const keptReps = clusters.map(c => c.repIdx)
   const mapping = new Map()
   for (const origIdx of counts.keys()) {
