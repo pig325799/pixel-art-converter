@@ -539,6 +539,15 @@ function toggleNumbers() {
 /* ---------------- 下载 ---------------- */
 function downloadPng() {
   if (!previewReady.value) return
+  downloadCanvas(false)
+}
+
+function downloadNumbered() {
+  if (!previewReady.value) return
+  downloadCanvas(true)
+}
+
+function downloadCanvas(withNumbers) {
   const out = document.createElement('canvas')
   const upscale = 32
   out.width = BLOCK_SIZE * upscale
@@ -548,12 +557,22 @@ function downloadPng() {
   const idx = blockIndices.value
   for (let by = 0; by < BLOCK_SIZE; by++) {
     for (let bx = 0; bx < BLOCK_SIZE; bx++) {
-      ctx.fillStyle = PALETTE_HEX[idx[by * BLOCK_SIZE + bx]]
+      const colorIdx = idx[by * BLOCK_SIZE + bx]
+      ctx.fillStyle = PALETTE_HEX[colorIdx]
       ctx.fillRect(bx * upscale, by * upscale, upscale, upscale)
+
+      if (withNumbers) {
+        const num = colorIdx + 1
+        ctx.fillStyle = 'rgba(0,0,0,0.55)'
+        ctx.font = `${Math.floor(upscale * 0.4)}px monospace`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(num, bx * upscale + upscale / 2, by * upscale + upscale / 2)
+      }
     }
   }
   const a = document.createElement('a')
-  a.download = 'pixel-art.png'
+  a.download = withNumbers ? 'pixel-art-numbered.png' : 'pixel-art.png'
   a.href = out.toDataURL('image/png')
   a.click()
 }
@@ -653,6 +672,10 @@ const colorCount = PALETTE.length
           <button class="btn accent" @click="downloadPng">
             <span class="btn-icon">↓</span>
             <span>下载像素画</span>
+          </button>
+          <button class="btn accent" @click="downloadNumbered">
+            <span class="btn-icon">#</span>
+            <span>下载标号版</span>
           </button>
         </div>
       </template>
