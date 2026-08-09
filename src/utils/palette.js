@@ -51,26 +51,53 @@ export const PALETTE = [
   [40, 56, 96]
 ]
 
-// 预计算调色板 hex 字符串，供预览绘制使用
+// 预计算调色板 hex 字符串
 export const PALETTE_HEX = PALETTE.map(
   ([r, g, b]) => `rgb(${r},${g},${b})`
 )
 
+// ---------- 感知色空间 Lab 辅助函数 ----------
+function rgbToLab(r, g, b) {
+  // sRGB -> 线性 RGB
+  let R = r / 255, G = g / 255, B = b / 255
+  R = R > 0.04045 ? Math.pow((R + 0.055) / 1.055, 2.4) : R / 12.92
+  G = G > 0.04045 ? Math.pow((G + 0.055) / 1.055, 2.4) : G / 12.92
+  B = B > 0.04045 ? Math.pow((B + 0.055) / 1.055, 2.4) : B / 12.92
+  // XYZ (D65 白)
+  let X = R * 0.4124 + G * 0.3576 + B * 0.1805
+  let Y = R * 0.2126 + G * 0.7152 + B * 0.0722
+  let Z = R * 0.0193 + G * 0.1192 + B * 0.9505
+  X /= 0.95047; Y /= 1.0; Z /= 1.08883
+  const e = 216 / 24389, k = 24389 / 27
+  const fx = X > e ? Math.cbrt(X) : (k * X + 16) / 116
+  const fy = Y > e ? Math.cbrt(Y) : (k * Y + 16) / 116
+  const fz = Z > e ? Math.cbrt(Z) : (k * Z + 16) / 116
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)]
+}
+
+// 预计算调色板所有颜色的 Lab 值，避免重复计算
+const PALETTE_LAB = PALETTE.map(([r, g, b]) => rgbToLab(r, g, b))
+
 /**
- * 在调色板中查找与给定颜色最接近的颜色索引。
- * 使用加权欧氏距离（人眼对绿色更敏感）。
+ * 感知色距离：基于 Lab 空间的 CIE76 ΔE，比 RGB 欧氏距离更符合人眼。
+ * 防止“肤色映射到绿色”这种视觉不合理的错误。
+ */
+function labDist([L1, a1, b1], [L2, a2, b2]) {
+  const dL = L1 - L2, da = a1 - a2, db = b1 - b2
+  return dL * dL + da * da + db * db
+}
+
+/**
+ * 查找最接近的调色板索引（Lab 感知距离）。
  */
 export function nearestColorIndex(r, g, b) {
+  const queryLab = rgbToLab(r, g, b)
   let bestIndex = 0
   let bestDist = Infinity
-  for (let i = 0; i < PALETTE.length; i++) {
-    const [pr, pg, pb] = PALETTE[i]
-    const dr = r - pr
-    const dg = g - pg
-    const db = b - pb
-    const dist = 0.3 * dr * dr + 0.59 * dg * dg + 0.11 * db * db
-    if (dist < bestDist) {
-      bestDist = dist
+  for (let i = 0; i < PALETTE_LAB.length; i++) {
+    const d = labDist(queryLab, PALETTE_LAB[i])
+    if (d < bestDist) {
+      bestDist = d
       bestIndex = i
     }
   }
@@ -78,10 +105,15 @@ export function nearestColorIndex(r, g, b) {
 }
 
 /**
- * 将一个 ImageData 区域采样为 blockSize x blockSize 的调色板索引数组。
- * 使用主导色采样：对每个块内的像素按粗量化分桶，取出现次数最多的桶的平均色，
- * 而非所有像素的平均色，从而避免边缘像素混色产生的脏色。
+ * 采样为 blockSize x blockSize 的调色板索引数组。
+ *
+ * 混合策略：
+ * - 每个块先做 16 级粗量化分桶；
+ * - 如果第一大桶的占比 >= DOMINANT_RATIO_THRESH（0.45），则用该桶代表色；
+ * - 否则（多色混合区域），使用整区域真实平均色，避免边缘色被强制拉向错误主导色。
  */
+const DOMINANT_RATIO_THRESH = 0.45
+
 export function sampleToBlockIndices(
   imageData,
   sx,
@@ -102,46 +134,55 @@ export function sampleToBlockIndices(
       const x1 = Math.floor(sx + (bx + 1) * cellW)
       const y1 = Math.floor(sy + (by + 1) * cellH)
 
-      // 主导色采样：粗量化分桶
       const buckets = new Map()
+      let totalPicked = 0
+      let avgR = 0, avgG = 0, avgB = 0
+
       for (let py = y0; py < y1; py++) {
         for (let px = x0; px < x1; px++) {
           if (px < 0 || py < 0 || px >= imgW || py >= imgH) continue
           const idx = (py * imgW + px) * 4
           const alpha = data[idx + 3]
-          if (alpha < 128) continue // 跳过透明像素
+          if (alpha < 128) continue
           const r = data[idx]
           const g = data[idx + 1]
           const b = data[idx + 2]
-          // 粗量化到 32 级（>>3 再 >>2，每通道 32 档）
-          const key = (r >> 3) * 1024 + (g >> 3) * 32 + (b >> 3)
+          // 分桶从 32 级细化到 16 级（每通道 16 档，共 4096 桶）
+          const key = (r >> 4) * 256 + (g >> 4) * 16 + (b >> 4)
           if (!buckets.has(key)) {
             buckets.set(key, { r: 0, g: 0, b: 0, count: 0 })
           }
           const bucket = buckets.get(key)
-          bucket.r += r
-          bucket.g += g
-          bucket.b += b
-          bucket.count++
+          bucket.r += r; bucket.g += g; bucket.b += b; bucket.count++
+          avgR += r; avgG += g; avgB += b
+          totalPicked++
         }
       }
 
       let r, g, b
-      if (buckets.size > 0) {
-        // 取出现次数最多的桶
-        let bestBucket = null
-        let bestCount = 0
+      if (buckets.size === 0) {
+        r = g = b = 255
+      } else {
+        // 选主导桶
+        let bestBucket = null, bestCount = 0
         for (const bucket of buckets.values()) {
           if (bucket.count > bestCount) {
             bestCount = bucket.count
             bestBucket = bucket
           }
         }
-        r = bestBucket.r / bestBucket.count
-        g = bestBucket.g / bestBucket.count
-        b = bestBucket.b / bestBucket.count
-      } else {
-        r = g = b = 255
+        const dominantRatio = bestCount / totalPicked
+        if (dominantRatio >= DOMINANT_RATIO_THRESH) {
+          // 主色明确，用主色桶平均
+          r = bestBucket.r / bestCount
+          g = bestBucket.g / bestCount
+          b = bestBucket.b / bestCount
+        } else {
+          // 多色混杂区（边缘/渐变），用真实平均色避免异常传播
+          r = avgR / totalPicked
+          g = avgG / totalPicked
+          b = avgB / totalPicked
+        }
       }
       result[by * blockSize + bx] = nearestColorIndex(r | 0, g | 0, b | 0)
     }
@@ -150,42 +191,35 @@ export function sampleToBlockIndices(
 }
 
 /**
- * 去噪后处理：消除完全孤立的单点噪点。
- * 只处理周围 8 邻居颜色完全一致、且与当前颜色不同的情况（真正的“孤点”），
- * 以此保护线条和细节，避免过度平滑导致特征丢失。
+ * 去噪：只消除“完全孤立的 1 像素点”，其他细节一律保留。
  */
 export function denoiseIndices(indices, blockSize) {
-  let result = indices.slice()
+  const result = indices.slice()
   const next = result.slice()
   for (let by = 0; by < blockSize; by++) {
     for (let bx = 0; bx < blockSize; bx++) {
       const idx = by * blockSize + bx
       const current = result[idx]
-      
-      // 统计周围 8 邻居
+
       let neighborColor = -1
       let isIsolated = true
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           if (dx === 0 && dy === 0) continue
-          const nx = bx + dx
-          const ny = by + dy
+          const nx = bx + dx, ny = by + dy
           if (nx < 0 || ny < 0 || nx >= blockSize || ny >= blockSize) {
-            isIsolated = false // 边缘不算孤立
-            break
+            isIsolated = false; break
           }
           const nIdx = result[ny * blockSize + nx]
           if (neighborColor === -1) {
             neighborColor = nIdx
           } else if (nIdx !== neighborColor) {
-            isIsolated = false
-            break
+            isIsolated = false; break
           }
         }
         if (!isIsolated) break
       }
-      
-      // 如果是完全孤立的点，替换为邻居颜色
+
       if (isIsolated && neighborColor !== -1 && current !== neighborColor) {
         next[idx] = neighborColor
       }
@@ -195,9 +229,8 @@ export function denoiseIndices(indices, blockSize) {
 }
 
 /**
- * 颜色合并：使用贪心层级聚类，逐步合并最接近的颜色对。
- * 比简单频次保留更智能：会优先合并视觉上最接近的颜色，
- * 减少颜色跳跃带来的脏色感。
+ * 颜色合并：贪心层级聚类 + 感知距离。
+ * 合并完成后，每个被移除的颜色重新映射到**视觉最近**的保留色。
  */
 export function reduceColors(indices, maxColors) {
   if (indices.length === 0) return indices
@@ -209,27 +242,20 @@ export function reduceColors(indices, maxColors) {
 
   if (counts.size <= maxColors) return indices
 
-  // 调色板颜色距离
-  function colorDist(i, j) {
-    const [r1, g1, b1] = PALETTE[i]
-    const [r2, g2, b2] = PALETTE[j]
-    const dr = r1 - r2, dg = g1 - g2, db = b1 - b2
-    return 0.3 * dr * dr + 0.59 * dg * dg + 0.11 * db * db
+  function paletteColorDist(i, j) {
+    return labDist(PALETTE_LAB[i], PALETTE_LAB[j])
   }
 
-  // 初始化：每个使用的颜色一个簇
   const clusters = []
   for (const [idx, count] of counts) {
     clusters.push({ members: [idx], weight: count, repIdx: idx })
   }
 
-  // 贪心合并：每次合并距离最近的两个簇
   while (clusters.length > maxColors) {
     let bestI = -1, bestJ = -1, bestScore = Infinity
     for (let i = 0; i < clusters.length; i++) {
       for (let j = i + 1; j < clusters.length; j++) {
-        const d = colorDist(clusters[i].repIdx, clusters[j].repIdx)
-        // 评分：距离越小越优先合并，低频次簇更容易被合并
+        const d = paletteColorDist(clusters[i].repIdx, clusters[j].repIdx)
         const minWeight = Math.min(clusters[i].weight, clusters[j].weight)
         const score = d + minWeight * 0.5
         if (score < bestScore) {
@@ -239,28 +265,25 @@ export function reduceColors(indices, maxColors) {
         }
       }
     }
-    // 合并 bestI 和 bestJ，代表色取频次更高的
-    const ci = clusters[bestI]
-    const cj = clusters[bestJ]
+    const ci = clusters[bestI], cj = clusters[bestJ]
     const merged = {
       members: [...ci.members, ...cj.members],
       weight: ci.weight + cj.weight,
       repIdx: ci.weight >= cj.weight ? ci.repIdx : cj.repIdx
     }
-    // 先删大索引再删小索引
     clusters.splice(bestJ, 1)
     clusters.splice(bestI, 1)
     clusters.push(merged)
   }
 
-  // 构建映射表：强制将所有颜色映射到调色板中距离最近的保留色
+  // 最终映射：每种源颜色强制映射到视觉最近的保留色
   const keptReps = clusters.map(c => c.repIdx)
   const mapping = new Map()
   for (const origIdx of counts.keys()) {
     let bestRepIdx = origIdx
     let bestDist = Infinity
     for (const repIdx of keptReps) {
-      const d = colorDist(origIdx, repIdx)
+      const d = paletteColorDist(origIdx, repIdx)
       if (d < bestDist) {
         bestDist = d
         bestRepIdx = repIdx
