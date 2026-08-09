@@ -352,10 +352,10 @@ function renderPreview() {
       default: return sampleToBlockIndices(...args)
     }
   })()
-  // 去噪：消除采样产生的孤立色块（抖动算法跳过去噪）
+  // 去噪：消除采样产生的孤立色块（抖动算法跳过去噪，保留颗粒感）
   const denoised = algorithm.value === 'dither' ? indices : denoiseIndices(indices, BLOCK_SIZE)
-  // 降色：层级聚类合并到目标颜色数（抖动算法跳过降色）
-  const reduced = algorithm.value === 'dither' ? denoised : reduceColors(denoised, maxColors.value)
+  // 降色：所有算法都走层级聚类合并到目标颜色数
+  const reduced = reduceColors(denoised, maxColors.value)
   blockIndices.value = reduced
   previewReady.value = true
 
