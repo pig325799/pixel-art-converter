@@ -79,13 +79,8 @@ export function nearestColorIndex(r, g, b) {
 
 /**
  * 将一个 ImageData 区域采样为 blockSize x blockSize 的调色板索引数组。
- * @param {ImageData} imageData 源图像数据
- * @param {number} sx 源区域左上角 x（像素坐标）
- * @param {number} sy 源区域左上角 y
- * @param {number} sw 源区域宽
- * @param {number} sh 源区域高
- * @param {number} blockSize 输出边长（24）
- * @returns {number[]} 长度 blockSize*blockSize 的调色板索引数组
+ * 使用主导色采样：对每个块内的像素按粗量化分桶，取出现次数最多的桶的平均色，
+ * 而非所有像素的平均色，从而避免边缘像素混色产生的脏色。
  */
 export function sampleToBlockIndices(
   imageData,
@@ -102,32 +97,49 @@ export function sampleToBlockIndices(
 
   for (let by = 0; by < blockSize; by++) {
     for (let bx = 0; bx < blockSize; bx++) {
-      // 采样该子块内所有像素的平均色
-      let r = 0,
-        g = 0,
-        b = 0,
-        a = 0,
-        count = 0
       const x0 = Math.floor(sx + bx * cellW)
       const y0 = Math.floor(sy + by * cellH)
       const x1 = Math.floor(sx + (bx + 1) * cellW)
       const y1 = Math.floor(sy + (by + 1) * cellH)
+
+      // 主导色采样：粗量化分桶
+      const buckets = new Map()
       for (let py = y0; py < y1; py++) {
         for (let px = x0; px < x1; px++) {
           if (px < 0 || py < 0 || px >= imgW || py >= imgH) continue
           const idx = (py * imgW + px) * 4
-          const alpha = data[idx + 3] / 255
-          r += data[idx] * alpha
-          g += data[idx + 1] * alpha
-          b += data[idx + 2] * alpha
-          a += alpha
-          count++
+          const alpha = data[idx + 3]
+          if (alpha < 128) continue // 跳过透明像素
+          const r = data[idx]
+          const g = data[idx + 1]
+          const b = data[idx + 2]
+          // 粗量化到 32 级（>>3 再 >>2，每通道 32 档）
+          const key = (r >> 3) * 1024 + (g >> 3) * 32 + (b >> 3)
+          if (!buckets.has(key)) {
+            buckets.set(key, { r: 0, g: 0, b: 0, count: 0 })
+          }
+          const bucket = buckets.get(key)
+          bucket.r += r
+          bucket.g += g
+          bucket.b += b
+          bucket.count++
         }
       }
-      if (count > 0 && a > 0) {
-        r /= a
-        g /= a
-        b /= a
+
+      let r, g, b
+      if (buckets.size > 0) {
+        // 取出现次数最多的桶
+        let bestBucket = null
+        let bestCount = 0
+        for (const bucket of buckets.values()) {
+          if (bucket.count > bestCount) {
+            bestCount = bucket.count
+            bestBucket = bucket
+          }
+        }
+        r = bestBucket.r / bestBucket.count
+        g = bestBucket.g / bestBucket.count
+        b = bestBucket.b / bestBucket.count
       } else {
         r = g = b = 255
       }
@@ -137,39 +149,116 @@ export function sampleToBlockIndices(
   return result
 }
 
+/**
+ * 去噪后处理：消除孤立色块。
+ * 如果一个色块和周围 8 邻居的主导色不同，且主导色邻居数 >= 阈值，
+ * 则将该色块替换为邻居主导色。
+ * 执行多轮以逐步消除噪点。
+ */
+export function denoiseIndices(indices, blockSize, threshold = 5, rounds = 2) {
+  let result = indices.slice()
+  for (let round = 0; round < rounds; round++) {
+    const next = result.slice()
+    for (let by = 0; by < blockSize; by++) {
+      for (let bx = 0; bx < blockSize; bx++) {
+        const idx = by * blockSize + bx
+        const current = result[idx]
+        // 统计周围 8 邻居
+        const neighborCounts = new Map()
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue
+            const nx = bx + dx
+            const ny = by + dy
+            if (nx < 0 || ny < 0 || nx >= blockSize || ny >= blockSize) continue
+            const nIdx = result[ny * blockSize + nx]
+            neighborCounts.set(nIdx, (neighborCounts.get(nIdx) || 0) + 1)
+          }
+        }
+        // 找邻居主导色
+        let dominantNeighbor = current
+        let maxCount = 0
+        for (const [nIdx, count] of neighborCounts) {
+          if (count > maxCount) {
+            maxCount = count
+            dominantNeighbor = nIdx
+          }
+        }
+        // 如果当前色不同于邻居主导色且主导色足够强，则替换
+        if (current !== dominantNeighbor && maxCount >= threshold) {
+          next[idx] = dominantNeighbor
+        }
+      }
+    }
+    result = next
+  }
+  return result
+}
+
+/**
+ * 颜色合并：使用贪心层级聚类，逐步合并最接近的颜色对。
+ * 比简单频次保留更智能：会优先合并视觉上最接近的颜色，
+ * 减少颜色跳跃带来的脏色感。
+ */
 export function reduceColors(indices, maxColors) {
-  if (indices.length <= maxColors) return indices
+  if (indices.length === 0) return indices
 
   const counts = new Map()
   for (const idx of indices) {
     counts.set(idx, (counts.get(idx) || 0) + 1)
   }
 
-  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1])
-  const kept = new Set(sorted.slice(0, maxColors).map(([idx]) => idx))
+  if (counts.size <= maxColors) return indices
 
-  if (kept.size === 0) return indices
+  // 调色板颜色距离
+  function colorDist(i, j) {
+    const [r1, g1, b1] = PALETTE[i]
+    const [r2, g2, b2] = PALETTE[j]
+    const dr = r1 - r2, dg = g1 - g2, db = b1 - b2
+    return 0.3 * dr * dr + 0.59 * dg * dg + 0.11 * db * db
+  }
 
-  const mapping = new Map()
-  for (const idx of counts.keys()) {
-    if (kept.has(idx)) {
-      mapping.set(idx, idx)
-    } else {
-      const [r, g, b] = PALETTE[idx]
-      let bestIdx = -1
-      let bestDist = Infinity
-      for (const keptIdx of kept) {
-        const [pr, pg, pb] = PALETTE[keptIdx]
-        const dr = r - pr
-        const dg = g - pg
-        const db = b - pb
-        const dist = 0.3 * dr * dr + 0.59 * dg * dg + 0.11 * db * db
-        if (dist < bestDist) {
-          bestDist = dist
-          bestIdx = keptIdx
+  // 初始化：每个使用的颜色一个簇
+  const clusters = []
+  for (const [idx, count] of counts) {
+    clusters.push({ members: [idx], weight: count, repIdx: idx })
+  }
+
+  // 贪心合并：每次合并距离最近的两个簇
+  while (clusters.length > maxColors) {
+    let bestI = -1, bestJ = -1, bestScore = Infinity
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        const d = colorDist(clusters[i].repIdx, clusters[j].repIdx)
+        // 评分：距离越小越优先合并，低频次簇更容易被合并
+        const minWeight = Math.min(clusters[i].weight, clusters[j].weight)
+        const score = d + minWeight * 0.5
+        if (score < bestScore) {
+          bestScore = score
+          bestI = i
+          bestJ = j
         }
       }
-      mapping.set(idx, bestIdx)
+    }
+    // 合并 bestI 和 bestJ，代表色取频次更高的
+    const ci = clusters[bestI]
+    const cj = clusters[bestJ]
+    const merged = {
+      members: [...ci.members, ...cj.members],
+      weight: ci.weight + cj.weight,
+      repIdx: ci.weight >= cj.weight ? ci.repIdx : cj.repIdx
+    }
+    // 先删大索引再删小索引
+    clusters.splice(bestJ, 1)
+    clusters.splice(bestI, 1)
+    clusters.push(merged)
+  }
+
+  // 构建映射表
+  const mapping = new Map()
+  for (const cluster of clusters) {
+    for (const idx of cluster.members) {
+      mapping.set(idx, cluster.repIdx)
     }
   }
 

@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { PALETTE, PALETTE_HEX, sampleToBlockIndices, reduceColors } from '../utils/palette.js'
+import { PALETTE, PALETTE_HEX, sampleToBlockIndices, reduceColors, denoiseIndices } from '../utils/palette.js'
 
 const BLOCK_SIZE = 24
 
@@ -329,7 +329,10 @@ function renderPreview() {
     sh,
     BLOCK_SIZE
   )
-  const reduced = reduceColors(indices, maxColors.value)
+  // 去噪：消除采样产生的孤立色块
+  const denoised = denoiseIndices(indices, BLOCK_SIZE)
+  // 降色：层级聚类合并到目标颜色数
+  const reduced = reduceColors(denoised, maxColors.value)
   blockIndices.value = reduced
   previewReady.value = true
 
