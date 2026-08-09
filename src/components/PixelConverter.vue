@@ -33,18 +33,6 @@ const blockIndices = ref([])
 const previewReady = ref(false)
 const sourceInfo = ref({ w: 0, h: 0 })
 
-/* ---------------- 调色板分组展示 ---------------- */
-const paletteGroups = computed(() => [
-  { name: '灰阶', start: 0, end: 4, hue: 'mono' },
-  { name: '红', start: 4, end: 8, hue: 'red' },
-  { name: '粉', start: 8, end: 12, hue: 'red' },
-  { name: '橙', start: 12, end: 20, hue: 'orange' },
-  { name: '绿', start: 20, end: 22, hue: 'green' },
-  { name: '棕', start: 22, end: 28, hue: 'brown' },
-  { name: '蓝紫', start: 28, end: 32, hue: 'blue' },
-  { name: '青', start: 32, end: 40, hue: 'cyan' }
-])
-
 /* ---------------- 预览统计 ---------------- */
 const previewStats = computed(() => {
   const arr = blockIndices.value

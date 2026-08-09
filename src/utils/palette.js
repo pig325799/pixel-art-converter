@@ -417,16 +417,18 @@ export function sampleFloydSteinberg(imageData, sx, sy, sw, sh, blockSize) {
   const buf = new Float32Array(blockSize * blockSize * 3)
   const cnt = new Int32Array(blockSize * blockSize)
 
-  for (let py = 0; py < imgH; py++) {
-    for (let px = 0; px < imgW; px++) {
-      // 只处理选区内
-      const relX = px - sx
-      const relY = py - sy
-      if (relX < 0 || relY < 0 || relX >= sw || relY >= sh) continue
+  // 只遍历选区范围内的像素（性能优化：避免遍历整张图）
+  const startX = Math.max(0, Math.floor(sx))
+  const startY = Math.max(0, Math.floor(sy))
+  const endX = Math.min(imgW, Math.ceil(sx + sw))
+  const endY = Math.min(imgH, Math.ceil(sy + sh))
+
+  for (let py = startY; py < endY; py++) {
+    for (let px = startX; px < endX; px++) {
       const idx = (py * imgW + px) * 4
       if (data[idx + 3] < 128) continue
-      const bx = Math.min(blockSize - 1, Math.floor(relX / cellW))
-      const by = Math.min(blockSize - 1, Math.floor(relY / cellH))
+      const bx = Math.min(blockSize - 1, Math.floor((px - sx) / cellW))
+      const by = Math.min(blockSize - 1, Math.floor((py - sy) / cellH))
       const bi = (by * blockSize + bx) * 3
       buf[bi] += data[idx]; buf[bi + 1] += data[idx + 1]; buf[bi + 2] += data[idx + 2]
       cnt[by * blockSize + bx]++
